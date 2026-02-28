@@ -1,0 +1,134 @@
+immunis:
+  # --- Quartermaster Pipeline (PRD §4) ---
+  quartermaster:
+    signal_buffer_size: 10000
+    learn_observation_window: 300
+
+  # --- Confidence Thresholds (PRD §4.4) ---
+  # These are INITIAL VALUES.  The substrate adjusts from moment one.
+  thresholds:
+    auto_execute: 0.70
+    recommend: 0.40
+    host_premium: 0.15
+
+  # --- The Armory (PRD §6) ---
+  armory:
+    max_entries: 10000
+    persistence_format: "msgpack"
+    search_top_k: 10
+    match_threshold: 0.90
+    eviction_policy: "lru"
+
+  # --- Response Primitives (PRD §7) ---
+  response:
+    kill_grace_seconds: 5
+    quarantine_dir: "~/.et_modules/immunis/quarantine"
+    forensics_dir: "~/.et_modules/immunis/forensics"
+    forensics_min_disk_mb: 100
+    protected_pids: []
+    protected_paths:
+      - "/etc/passwd"
+      - "/etc/shadow"
+      - "/etc/group"
+      - "/boot"
+    protected_destinations:
+      - "127.0.0.1"
+      - "::1"
+
+  # --- Sensors (PRD §5) ---
+  sensors:
+    filesystem:
+      enabled: true
+      poll_interval_seconds: 5.0
+      watched_paths:
+        - "/"
+      excluded_paths:
+        - "/proc"
+        - "/sys"
+        - "/dev"
+        - "/tmp/.immunis_*"
+      sensitive_paths:
+        - "/etc/cron.d"
+        - "/etc/cron.daily"
+        - "/etc/systemd/system"
+        - "/etc/ssh"
+        - "~/.ssh"
+        - "~/.et_modules"
+    process:
+      enabled: true
+      poll_interval_seconds: 10.0
+      cpu_threshold_pct: 90.0
+      memory_threshold_pct: 80.0
+      known_process_allowlist:
+        - "sshd"
+        - "systemd"
+        - "python3"
+      suspicious_locations:
+        - "/tmp"
+        - "/dev/shm"
+        - "/var/tmp"
+    network:
+      enabled: true
+      poll_interval_seconds: 15.0
+      suspicious_ports:
+        - 4444
+        - 5555
+        - 8888
+        - 1337
+      known_good_destinations:
+        - "127.0.0.1"
+        - "::1"
+      max_outbound_connections: 100
+    dependency:
+      enabled: true
+      poll_interval_seconds: 300.0
+      package_managers:
+        - "pip"
+        - "npm"
+      snapshot_path: "~/.et_modules/immunis/dependency_snapshot.json"
+    log:
+      enabled: true
+      poll_interval_seconds: 30.0
+      log_sources:
+        - "/var/log/auth.log"
+        - "/var/log/syslog"
+      use_journalctl: true
+      auth_failure_window_seconds: 300
+      auth_failure_threshold: 5
+    memory:
+      enabled: true
+      poll_interval_seconds: 30.0
+      system_memory_threshold_pct: 95.0
+      process_growth_rate_threshold_mb_per_min: 100.0
+    substrate:
+      enabled: true
+      poll_interval_seconds: 60.0
+      weight_divergence_threshold: 2.0
+      novelty_saturation_threshold: 0.95
+
+  # --- Training Wheels (PRD §9) ---
+  training_wheels:
+    min_armory_entries: 50
+    min_substrate_outcomes: 100
+    min_user_feedbacks: 20
+    min_runtime_hours: 24
+
+  # --- NG-Lite Integration (PRD §10) ---
+  ng_lite:
+    enabled: true
+    module_id: "immunis"
+    state_path: "~/.et_modules/immunis/ng_lite_state.json"
+
+  # --- Embedding (PRD §5 sensor embedding) ---
+  embedding:
+    model: "sentence-transformers/all-MiniLM-L6-v2"
+    dim: 384
+    device: "auto"
+    fallback_to_hash: true
+
+  # --- Checkpointing ---
+  checkpoint_interval_seconds: 300
+
+  # --- Emergency ---
+  emergency:
+    kill_switch: false

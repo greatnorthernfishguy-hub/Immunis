@@ -1,0 +1,31 @@
+{
+  "_schema": "et_module/2.0",
+  "module_id": "immunis",
+  "display_name": "Immunis",
+  "version": "0.1.0",
+  "description": "Full-spectrum system security for the NeuroGraph ecosystem.",
+  "git_remote": "https://github.com/greatnorthernfishguy-hub/Immunis.git",
+  "git_branch": "main",
+  "entry_point": "immunis_hook.py",
+  "install_path": "",
+  "service_name": "",
+  "api_port": 0,
+  "ecosystem": {
+    "ng_lite": true,
+    "ng_lite_version": "1.0.0",
+    "peer_bridge": true,
+    "tier3_upgrade": true,
+    "ng_ecosystem_version": "1.0.0",
+    "openclaw_adapter": "immunis_hook.py",
+    "openclaw_skill_name": "Immunis System Security",
+    "shared_learning_writes": true,
+    "capabilities": [
+      "system_security",
+      "threat_detection",
+      "behavioral_analysis",
+      "zero_day_defense"
+    ]
+  },
+  "dependencies": [],
+  "provides": []
+}
