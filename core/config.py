@@ -187,7 +187,7 @@ class NGLiteConfig:
 
 @dataclass
 class EmbeddingConfig:
-    model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    model: str = "sentence-transformers/all-MiniLM-L6-v2"  # fastembed uses same model ID
     dim: int = 384
     device: str = "auto"
     fallback_to_hash: bool = True

@@ -31,25 +31,20 @@ fi
 
 # 3. Register with ET Module Manager
 echo "[3/5] Registering with ET Module Manager..."
-REGISTRY="$ET_ROOT/registry.json"
-if [ ! -f "$REGISTRY" ]; then
-    echo '{"modules": {}}' > "$REGISTRY"
-fi
 python3 -c "
-import json, time
-with open('$REGISTRY', 'r') as f:
-    registry = json.load(f)
-registry.setdefault('modules', {})
-registry['modules']['$MODULE_ID'] = {
-    'install_path': '$INSTALL_DIR',
-    'registered_at': time.time(),
-    'version': '0.1.0',
-    'entry_point': 'immunis_hook.py',
-}
-with open('$REGISTRY', 'w') as f:
-    json.dump(registry, f, indent=2)
-print('  Registered as $MODULE_ID in', '$REGISTRY')
-"
+import sys, json
+sys.path.insert(0, '$INSTALL_DIR')
+from et_modules.manager import ETModuleManager, ModuleManifest
+
+manifest = ModuleManifest.from_file('$INSTALL_DIR/et_module.json')
+if manifest:
+    manifest.install_path = '$INSTALL_DIR'
+    manager = ETModuleManager()
+    manager.register(manifest)
+    print(f'  Registered: {manifest.module_id} v{manifest.version}')
+else:
+    print('  WARNING: Could not load et_module.json')
+" 2>/dev/null || echo "  Standalone mode (ET Module Manager unavailable)"
 
 # 4. Create autonomic state file if not present
 echo "[4/5] Checking autonomic state..."
@@ -90,7 +85,7 @@ echo "=== Installation Summary ==="
 echo "Module ID:     $MODULE_ID"
 echo "Install path:  $INSTALL_DIR"
 echo "Data path:     $MODULE_DIR"
-echo "Registry:      $REGISTRY"
+echo "Registry:      $ET_ROOT/registry.json"
 if [ "$ALL_PRESENT" = true ]; then
     echo "Vendored files: All present"
 else

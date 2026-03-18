@@ -65,6 +65,32 @@ License: AGPL-3.0 (see NeuroGraph LICENSE)
 Author: Josh + Claude
 Date: February 2026
 
+# ---- Changelog ----
+# [2026-03-17] Claude Code (Opus 4.6) — #43 Receptor Layer (vector quantization)
+# What: Adaptive prototype centroids that incoming vectors snap to before
+#   node lookup. Prevents infinite node sprawl by funneling similar inputs
+#   through shared prototypes.
+# Why: Without quantization, every unique-enough input creates a new node.
+#   Node count grows linearly. Prototypes provide O(K) bounded lookup and
+#   organize the input space structurally. Punchlist #43, required before #28.
+# How: _snap_to_prototype() called in find_or_create_node() before hashing.
+#   K=256 prototypes initialized via k-means on existing embeddings after
+#   warmup. Slow EMA drift (α=0.001) so prototypes adapt to input distribution.
+#   Birth/death lifecycle deferred to Elmer. Serialized with state for
+#   persistence. Old state files load cleanly (no receptor_layer key = skip).
+# -------------------
+# [2026-03-13] Claude Code — Persist node embeddings across restarts
+# What: Store embedding vector on NGLiteNode, serialize/deserialize with
+#   state, rebuild _embedding_cache from persisted nodes on load().
+# Why: _embedding_cache cleared on load(), causing _find_similar_node()
+#   to fail after every restart. Primary source of node sprawl — semantically
+#   identical inputs created duplicate nodes when cache was cold.
+# How: Added Optional[np.ndarray] embedding field to NGLiteNode. Backfill
+#   on exact hash match (always) and similarity match (only if None).
+#   New nodes born with embedding. _export_state()/_import_state() handle
+#   numpy<->list conversion. Old state files load cleanly (embedding=None).
+# -------------------
+
 Grok Review Changelog (v0.7.1):
     Accepted: Replaced per-node loop in _find_similar_node() with vectorized
         np.stack + matrix-vector dot product.  For 1000 nodes this reduces
@@ -129,6 +155,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
     # Persistence
     "snapshot_version": "1.0.0",
+
+    # Receptor Layer (#43) — vector quantization via adaptive prototypes
+    "receptor_layer_enabled": True,
+    "receptor_layer_k": 256,                # Initial prototype count
+    "receptor_prototype_threshold": 0.75,   # Cosine similarity to snap to prototype
+    "receptor_ema_alpha": 0.001,            # Slow drift rate (Elmer will tune later)
+    "receptor_warmup_count": 256,           # Inputs before k-means init fires
 }
 
 
@@ -156,6 +189,7 @@ class NGLiteNode:
     activation_count: int = 0
     last_activation: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    embedding: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -331,6 +365,13 @@ class NGLite:
         # Embedding cache: hash -> full embedding (for similarity search)
         self._embedding_cache: Dict[str, np.ndarray] = {}
 
+        # Receptor layer (#43): adaptive prototype centroids
+        # Initialized via k-means after warmup_count inputs, then drifts via EMA.
+        # Prototypes are a routing lens above existing nodes, not a replacement.
+        self._prototypes: Optional[np.ndarray] = None  # (K, D) matrix or None
+        self._prototype_counts: Optional[np.ndarray] = None  # activation counts per prototype
+        self._receptor_input_count: int = 0  # inputs seen before init
+
         # Activation history (bounded, for stats and debugging)
         self._history: List[Dict[str, Any]] = []
         self._history_max = 1000
@@ -361,6 +402,10 @@ class NGLite:
             The matched or newly created NGLiteNode.
         """
         emb = self._normalize(embedding)
+
+        # Receptor layer: snap to nearest prototype before node lookup (#43)
+        emb = self._snap_to_prototype(emb)
+
         emb_hash = self._hash_embedding(emb)
 
         # Exact hash match
@@ -368,6 +413,7 @@ class NGLite:
             node = self.nodes[emb_hash]
             node.activation_count += 1
             node.last_activation = time.time()
+            node.embedding = emb
             self._embedding_cache[emb_hash] = emb
             return node
 
@@ -376,6 +422,9 @@ class NGLite:
         if similar is not None:
             similar.activation_count += 1
             similar.last_activation = time.time()
+            if similar.embedding is None:
+                similar.embedding = emb
+                self._embedding_cache[similar.embedding_hash] = emb
             return similar
 
         # Novel pattern — create new node
@@ -388,6 +437,7 @@ class NGLite:
             embedding_hash=emb_hash,
             activation_count=1,
             last_activation=time.time(),
+            embedding=emb,
         )
         self.nodes[emb_hash] = node
         self._embedding_cache[emb_hash] = emb
@@ -398,6 +448,7 @@ class NGLite:
         embedding: np.ndarray,
         target_id: str,
         success: bool,
+        strength: float = 1.0,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Record an outcome and update learning weights.
@@ -405,20 +456,31 @@ class NGLite:
         This is the core learning method. Call it after every
         decision to teach NG-Lite what works and what doesn't.
 
-        Hebbian rule:
-            - Success: weight += success_boost * (1.0 - weight)
-              (diminishing returns as weight approaches 1.0)
-            - Failure: weight -= failure_penalty * weight
-              (proportional to current confidence)
+        Hebbian rule (strength-modulated):
+            - Success: weight += success_boost * (1 - weight) * strength
+            - Failure: weight -= failure_penalty * weight * strength
 
-        If a bridge to NeuroGraph SaaS is connected, the outcome
-        is also forwarded there for cross-module learning.
+        The strength parameter lets callers indicate how significant
+        this outcome was in their domain.  High-severity TrollGuard
+        detections or divergent TID quality scores teach harder than
+        routine confirmations.  Default 1.0 preserves backward compat.
+
+        Strength experience accumulates on the synapse as metadata,
+        giving the topology a record of how intensely each connection
+        was forged.  At Tier 3, NeuroGraph proper reads these
+        signatures to distinguish battle-tested synapses from routine.
+
+        If a bridge is connected, the outcome is forwarded for
+        cross-module learning with strength included in metadata.
 
         Args:
             embedding: The input pattern embedding (1-D numpy array).
             target_id: What was chosen (model name, action, etc.).
             success: Whether the outcome was successful.
-            metadata: Optional context about this outcome.
+            strength: Learning intensity [0.0, 1.0].  How significant
+                this outcome was in the caller's domain.  Default 1.0.
+            metadata: Optional caller context.  Stored on the synapse
+                as last_context for extraction-boundary use.
 
         Returns:
             Dict with learning results (node_id, weight_after, etc.).
@@ -438,19 +500,29 @@ class NGLite:
 
         synapse.activation_count += 1
 
+        # Clamp strength to valid range
+        strength = float(np.clip(strength, 0.0, 1.0))
+
         if success:
             synapse.success_count += 1
-            # Hebbian strengthening with soft saturation
-            delta = self.config["success_boost"] * (1.0 - synapse.weight)
+            # Hebbian strengthening, modulated by caller-reported significance
+            delta = self.config["success_boost"] * (1.0 - synapse.weight) * strength
             synapse.weight += delta
         else:
             synapse.failure_count += 1
-            # Anti-Hebbian weakening proportional to current weight
-            delta = self.config["failure_penalty"] * synapse.weight
+            # Anti-Hebbian weakening, modulated by caller-reported significance
+            delta = self.config["failure_penalty"] * synapse.weight * strength
             synapse.weight -= delta
 
         synapse.weight = float(np.clip(synapse.weight, 0.0, 1.0))
         synapse.last_updated = time.time()
+
+        # Accumulate strength experience on synapse —
+        # the topology remembers how intensely it was taught
+        synapse.metadata["strength_sum"] = synapse.metadata.get("strength_sum", 0.0) + strength
+        synapse.metadata["strength_count"] = synapse.metadata.get("strength_count", 0) + 1
+        if metadata:
+            synapse.metadata["last_context"] = metadata
 
         self._total_outcomes += 1
         if success:
@@ -467,15 +539,17 @@ class NGLite:
         # Record in history
         self._record_history(result)
 
-        # Forward to bridge if connected
+        # Forward to bridge if connected (include strength for Tier 2/3)
         if self._bridge and self._bridge.is_connected():
             try:
+                bridge_meta = dict(metadata or {})
+                bridge_meta["strength"] = strength
                 enriched = self._bridge.record_outcome(
                     embedding=embedding,
                     target_id=target_id,
                     success=success,
                     module_id=self.module_id,
-                    metadata=metadata,
+                    metadata=bridge_meta,
                 )
                 if enriched:
                     result["bridge_response"] = enriched
@@ -488,7 +562,7 @@ class NGLite:
         self,
         embedding: np.ndarray,
         top_k: int = 3,
-    ) -> List[Tuple[str, float]]:
+    ) -> List[Tuple[str, float, str]]:
         """Get target recommendations for an input pattern.
 
         Finds the closest known pattern node and returns its strongest
@@ -503,7 +577,10 @@ class NGLite:
             top_k: Maximum number of recommendations to return.
 
         Returns:
-            List of (target_id, confidence) tuples, highest first.
+            List of (target_id, confidence, reasoning) tuples, highest
+            first.  The reasoning string captures the experience behind
+            each recommendation — learning mechanism, success ratio,
+            weight, activation volume, and strength signature.
             Empty list if no learned routes exist for this pattern.
         """
         # Try bridge first
@@ -515,26 +592,55 @@ class NGLite:
                     top_k=top_k,
                 )
                 if bridge_recs:
-                    # Bridge returns (target, confidence, reasoning)
-                    # We return (target, confidence) for API consistency
-                    return [(t, c) for t, c, _ in bridge_recs]
+                    return bridge_recs
             except Exception as e:
                 logger.warning("Bridge get_recommendations failed: %s", e)
 
         # Local learning
         node = self.find_or_create_node(embedding)
 
-        relevant = [
-            (syn.target_id, syn.weight)
-            for key, syn in self.synapses.items()
-            if key[0] == node.node_id and syn.weight > self.config["pruning_threshold"]
-        ]
+        relevant = []
+        for key, syn in self.synapses.items():
+            if key[0] == node.node_id and syn.weight > self.config["pruning_threshold"]:
+                reasoning = self._build_local_reasoning(syn)
+                relevant.append((syn.target_id, syn.weight, reasoning))
 
         if not relevant:
             return []
 
         relevant.sort(key=lambda x: x[1], reverse=True)
         return relevant[:top_k]
+
+    def _build_local_reasoning(self, synapse: NGLiteSynapse) -> str:
+        """Generate reasoning string from local Hebbian experience.
+
+        Single point of evolution for how NG-Lite articulates its local
+        learning.  V1 renders synapse stats and strength signatures.
+        As NG-Lite gains meta-learning capability (punch list #21),
+        this method becomes the place where reasoning generation
+        itself improves.
+
+        This is an extraction boundary — topology becomes human-legible
+        here.  The substrate doesn't need these labels; consumers and
+        dashboards do.
+
+        Args:
+            synapse: The synapse whose experience to articulate.
+
+        Returns:
+            Human-readable reasoning grounded in actual experience data.
+        """
+        total = synapse.success_count + synapse.failure_count
+        if total > 0:
+            detail = f"w={synapse.weight:.2f}, {synapse.activation_count} activations"
+            strength_count = synapse.metadata.get("strength_count", 0)
+            if strength_count > 0:
+                avg = synapse.metadata["strength_sum"] / strength_count
+                detail += f", avg_strength={avg:.2f}"
+            return (
+                f"Hebbian: {synapse.success_count}/{total} success ({detail})"
+            )
+        return f"Hebbian: no outcomes yet (w={synapse.weight:.2f})"
 
     def detect_novelty(self, embedding: np.ndarray) -> float:
         """How novel is this input pattern?
@@ -670,18 +776,28 @@ class NGLite:
             key = f"{src}|{tgt}"
             synapses_serialized[key] = asdict(syn)
 
+        # Receptor layer state (#43)
+        receptor_state = {}
+        if self._prototypes is not None:
+            receptor_state = {
+                "prototypes": self._prototypes.tolist(),
+                "prototype_counts": self._prototype_counts.tolist(),
+                "input_count": self._receptor_input_count,
+            }
+
         return {
             "version": self.config["snapshot_version"],
             "module_id": self.module_id,
             "timestamp": time.time(),
             "config": self.config,
-            "nodes": {k: asdict(v) for k, v in self.nodes.items()},
+            "nodes": {k: self._serialize_node(v) for k, v in self.nodes.items()},
             "synapses": synapses_serialized,
             "counters": {
                 "node_id_counter": self._node_id_counter,
                 "total_outcomes": self._total_outcomes,
                 "total_successes": self._total_successes,
             },
+            "receptor_layer": receptor_state,
         }
 
     def _import_state(self, state: Dict[str, Any]) -> None:
@@ -692,10 +808,19 @@ class NGLite:
         saved_config = state.get("config", {})
         self.config = {**DEFAULT_CONFIG, **saved_config}
 
-        # Restore nodes
+        # Clear caches before rebuild
+        self._embedding_cache.clear()
+        self._history.clear()
+
+        # Restore nodes (rebuild embedding cache from persisted embeddings)
         self.nodes = {}
         for key, node_data in state.get("nodes", {}).items():
-            self.nodes[key] = NGLiteNode(**node_data)
+            emb_list = node_data.pop("embedding", None)
+            node = NGLiteNode(**node_data)
+            if emb_list is not None:
+                node.embedding = self._normalize(np.array(emb_list, dtype=np.float32))
+                self._embedding_cache[key] = node.embedding
+            self.nodes[key] = node
 
         # Restore synapses
         self.synapses = {}
@@ -711,9 +836,23 @@ class NGLite:
         self._total_outcomes = counters.get("total_outcomes", 0)
         self._total_successes = counters.get("total_successes", 0)
 
-        # Clear caches (will rebuild on use)
-        self._embedding_cache.clear()
-        self._history.clear()
+        # Restore receptor layer (#43) — old state files load cleanly (no key)
+        receptor = state.get("receptor_layer", {})
+        if receptor.get("prototypes"):
+            self._prototypes = np.array(receptor["prototypes"], dtype=np.float32)
+            # Re-normalize after deserialization
+            norms = np.linalg.norm(self._prototypes, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            self._prototypes = self._prototypes / norms
+            self._prototype_counts = np.array(
+                receptor.get("prototype_counts", [0] * len(self._prototypes)),
+                dtype=np.int64,
+            )
+            self._receptor_input_count = receptor.get("input_count", 0)
+        else:
+            self._prototypes = None
+            self._prototype_counts = None
+            self._receptor_input_count = 0
 
     # -------------------------------------------------------------------
     # Stats & Telemetry
@@ -756,6 +895,20 @@ class NGLite:
     # Internal Methods
     # -------------------------------------------------------------------
 
+    def _serialize_node(self, node: NGLiteNode) -> Dict[str, Any]:
+        """Serialize a node to a JSON-compatible dict.
+
+        Converts embedding from np.ndarray to list for JSON.
+        Omits embedding key when None (backward-compatible with
+        state files created before embedding persistence).
+        """
+        d = asdict(node)
+        if node.embedding is not None:
+            d["embedding"] = node.embedding.tolist()
+        else:
+            d.pop("embedding", None)
+        return d
+
     @staticmethod
     def _normalize(embedding: np.ndarray) -> np.ndarray:
         """L2-normalize an embedding vector."""
@@ -775,6 +928,105 @@ class NGLite:
         truncated = embedding[:dims]
         hash_input = truncated.astype(np.float32).tobytes()
         return hashlib.sha256(hash_input).hexdigest()[:32]
+
+    # -------------------------------------------------------------------
+    # Receptor Layer (#43) — Adaptive Vector Quantization
+    # -------------------------------------------------------------------
+
+    def _snap_to_prototype(self, embedding: np.ndarray) -> np.ndarray:
+        """Snap an input vector to the nearest prototype centroid.
+
+        If receptor layer is not enabled or not yet initialized (still in
+        warmup), returns the input unchanged. Otherwise, finds the nearest
+        prototype above the similarity threshold and returns that prototype's
+        centroid. If no prototype is close enough, returns the input as-is
+        (novel pattern — passes through unquantized).
+
+        The matched prototype drifts toward the input via slow EMA, so
+        prototypes are living tissue that adapts to the input distribution.
+        Birth/death lifecycle is deferred to Elmer.
+
+        Args:
+            embedding: L2-normalized input vector (D,).
+
+        Returns:
+            Either the nearest prototype centroid or the original embedding.
+        """
+        if not self.config.get("receptor_layer_enabled", False):
+            return embedding
+
+        # Warmup phase: accumulate inputs before initializing prototypes
+        self._receptor_input_count += 1
+        if self._prototypes is None:
+            if self._receptor_input_count >= self.config["receptor_warmup_count"]:
+                self._init_prototypes()
+            if self._prototypes is None:
+                return embedding
+
+        # Vectorized cosine similarity against all prototypes
+        threshold = self.config["receptor_prototype_threshold"]
+        similarities = self._prototypes @ embedding  # (K,)
+        best_idx = int(np.argmax(similarities))
+        best_sim = float(similarities[best_idx])
+
+        if best_sim >= threshold:
+            # EMA drift: pull prototype toward input
+            alpha = self.config["receptor_ema_alpha"]
+            self._prototypes[best_idx] = self._normalize(
+                (1.0 - alpha) * self._prototypes[best_idx] + alpha * embedding
+            )
+            self._prototype_counts[best_idx] += 1
+            return self._prototypes[best_idx].copy()
+
+        # No prototype close enough — novel pattern passes through
+        return embedding
+
+    def _init_prototypes(self) -> None:
+        """Initialize prototypes via k-means on existing node embeddings.
+
+        Uses a simple iterative k-means (no external dependencies). If fewer
+        embeddings exist than K, uses all embeddings as prototypes.
+        """
+        if not self._embedding_cache:
+            return
+
+        embeddings = np.stack(list(self._embedding_cache.values()))
+        n = len(embeddings)
+        k = min(self.config["receptor_layer_k"], n)
+
+        if k < 2:
+            return
+
+        # Simple k-means: random init from existing embeddings, 20 iterations
+        rng = np.random.RandomState(42)
+        indices = rng.choice(n, size=k, replace=False)
+        centroids = embeddings[indices].copy()
+
+        for _ in range(20):
+            # Assign each embedding to nearest centroid
+            sims = embeddings @ centroids.T  # (N, K)
+            assignments = np.argmax(sims, axis=1)
+
+            # Recompute centroids
+            new_centroids = np.zeros_like(centroids)
+            for j in range(k):
+                members = embeddings[assignments == j]
+                if len(members) > 0:
+                    new_centroids[j] = members.mean(axis=0)
+                else:
+                    new_centroids[j] = centroids[j]
+
+            # L2-normalize centroids
+            norms = np.linalg.norm(new_centroids, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-12)
+            centroids = new_centroids / norms
+
+        self._prototypes = centroids
+        self._prototype_counts = np.zeros(k, dtype=np.int64)
+        logger.info(
+            "Receptor layer initialized: %d prototypes from %d embeddings",
+            k, n,
+        )
 
     def _find_similar_node(self, embedding: np.ndarray) -> Optional[NGLiteNode]:
         """Find a node with similar embedding (below novelty threshold).
