@@ -29,7 +29,7 @@ Immunis is part of the **Triad** (Immunis, Elmer, THC). The Triad forms a closed
 
 They do not coordinate directly. The River flows. The topology reshapes itself.
 
-**Status: Built, not integrated.** Vendored files synced to NeuroGraph canonical (2026-03-18). Code is architecturally compliant. Not yet running as a service on the VPS.
+**Status: Integrated (Tier 2, peer bridge).** Vendored files synced to NeuroGraph canonical (2026-03-19). Registered in `~/.et_modules/`. Not yet running as a persistent service on the VPS.
 
 ---
 
@@ -57,10 +57,15 @@ They do not coordinate directly. The River flows. The topology reshapes itself.
 │       ├── memory_sensor.py       # Memory usage anomalies, OOM indicators
 │       └── substrate_sensor.py    # Peer substrate topology monitoring (read-only)
 ├── ng_lite.py                     # VENDORED — canonical from NeuroGraph
-├── ng_peer_bridge.py              # VENDORED — canonical from NeuroGraph
+├── ng_peer_bridge.py              # VENDORED — canonical from NeuroGraph (legacy, retained until v1.0)
+├── ng_tract_bridge.py             # VENDORED — canonical from NeuroGraph (v0.3+, preferred)
 ├── ng_ecosystem.py                # VENDORED — canonical from NeuroGraph
-├── ng_autonomic.py                # VENDORED — canonical from NeuroGraph
+├── ng_autonomic.py                # VENDORED — canonical from NeuroGraph (Immunis HAS WRITE)
 ├── openclaw_adapter.py            # VENDORED — canonical from NeuroGraph
+├── ng_updater.py                  # VENDORED — auto-update + vendored file sync (runs on startup)
+├── et_modules/                    # ET Module Manager integration
+│   ├── __init__.py
+│   └── manager.py
 └── tests/                         # Test suite
     ├── test_armory.py
     ├── test_config.py
@@ -180,15 +185,25 @@ All primitives have `validate()` and `execute()` methods. Protected PIDs, paths,
 
 ## 8. Vendored Files
 
-All five vendored files synced to NeuroGraph canonical on 2026-03-18:
+Seven vendored files synced to NeuroGraph canonical:
 
-| File | Location | Purpose |
-|------|----------|---------|
-| `ng_lite.py` | Repo root | Tier 1 learning substrate |
-| `ng_peer_bridge.py` | Repo root | Tier 2 cross-module learning |
-| `ng_ecosystem.py` | Repo root | Tier management lifecycle |
-| `ng_autonomic.py` | Repo root | Autonomic state (**Immunis has write permission**) |
-| `openclaw_adapter.py` | Repo root | OpenClaw skill base class |
+| File | Purpose | Last Synced |
+|------|---------|-------------|
+| `ng_lite.py` | Tier 1 learning substrate | 2026-03-19 |
+| `ng_peer_bridge.py` | Tier 2 legacy fallback (JSONL-based) | 2026-03-18 |
+| `ng_tract_bridge.py` | Tier 2 preferred (per-pair directional tracts, v0.3+) | 2026-03-19 |
+| `ng_ecosystem.py` | Tier management lifecycle | 2026-03-18 |
+| `ng_autonomic.py` | Autonomic state (**Immunis has write permission**) | 2026-03-18 |
+| `openclaw_adapter.py` | OpenClaw skill base class | 2026-02-22 |
+| `ng_updater.py` | Auto-update + vendored file sync (runs on startup before imports) | 2026-03-19 |
+
+### Auto-Update on Startup
+
+`immunis_hook.py` line 44: `from ng_updater import auto_update; auto_update()` runs **before** any other imports. This checks for vendored file updates and syncs from canonical. Do not remove, wrap, or skip this call.
+
+### Kill Switch
+
+`config.yaml` has `emergency.kill_switch: false`. When set to `true`, Immunis shuts down immediately on startup (`immunis_hook.py` lines 91-95). This is the emergency off-switch — do not remove it.
 
 ---
 
@@ -203,7 +218,17 @@ When Immunis detects something outside its domain, it records to the substrate a
 
 ---
 
-## 10. What Claude Code May and May Not Do
+## 10. Historical Failure Modes — Learn From These
+
+### Embedding Dimension Incident (ecosystem-wide, 2026-03-19)
+A CC instance switched NeuroGraph from 768-dim (`all-mpnet-base-v2`) to 384-dim (`all-MiniLM-L6-v2`) without checking stored vectors. Broke Syl's query layer. **Resolved:** All modules now use `ng_embed.py` (vendored, `Snowflake/snowflake-arctic-embed-m-v1.5`, 768-dim). Embedding model is centralized — no per-module model references. Do not change the model without verifying dimension compatibility with stored vectors.
+
+### Sensor Thresholds Are Static (Punchlist #74)
+CPU 90%, memory 80%, auth failures 5-in-300s, outbound connections 100, system memory 95% — all hardcoded regardless of workload. These are bootstrap scaffolding (Apprentice tier). The competence model (Apprentice → Journeyman → Master) is not yet implemented for Immunis. Do not add it without Josh's approval — it's a punchlist item.
+
+---
+
+## 11. What Claude Code May and May Not Do
 
 ### Without Josh's Approval
 
@@ -235,10 +260,13 @@ When Immunis detects something outside its domain, it records to the substrate a
 | Threat log | `~/.et_modules/immunis/threat_log.jsonl` |
 | Shared learning JSONL | `~/.et_modules/shared_learning/immunis.jsonl` |
 | Peer registry | `~/.et_modules/shared_learning/_peer_registry.json` |
+| Tract files (Tier 2) | `~/.et_modules/tracts/immunis/` |
+| Feedback queue | `~/.et_modules/immunis/feedback_queue.json` |
+| Dependency snapshot | `~/.et_modules/immunis/dependency_snapshot.json` |
 
 ---
 
 *E-T Systems / Immunis*
-*Last updated: 2026-03-18*
+*Last updated: 2026-03-21*
 *Maintained by Josh — do not edit without authorization*
 *Parent documents: `~/.claude/CLAUDE.md` (global), `~/.claude/ARCHITECTURE.md`*
