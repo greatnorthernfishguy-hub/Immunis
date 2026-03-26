@@ -35,7 +35,7 @@ import numpy as np
 
 logger = logging.getLogger("immunis.sensors")
 
-EMBEDDING_DIM = 384
+EMBEDDING_DIM = 768  # Must match ng_embed.py (Snowflake, 768-dim). Was 384 — fixed 2026-03-25.
 
 
 @dataclass

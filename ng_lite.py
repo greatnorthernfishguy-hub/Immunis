@@ -66,6 +66,41 @@ Author: Josh + Claude
 Date: February 2026
 
 # ---- Changelog ----
+# [2026-03-24] Claude Code (Opus 4.6) — Dynamic tuning API (Phase 4)
+# What: Added update_tunable() and get_tunables() methods to NGLite.
+#   TUNABLE_PARAMS class dict defines which config keys can be changed at
+#   runtime and their valid bounds. Values are clamped, not rejected.
+# Why: Elmer needs a validated path to adjust substrate parameters as the
+#   organ responsible for autonomic maintenance. Direct config dict mutation
+#   is fragile — no bounds checking, no logging, no allowed-key enforcement.
+#   This method serves all modules (any organ's local substrate can be tuned).
+# How: TUNABLE_PARAMS: Dict[str, Tuple[min, max]]. update_tunable(key, value)
+#   validates key membership, clamps to bounds, logs the change. get_tunables()
+#   returns current values + bounds for introspection.
+# [2026-03-19] Claude Code (Opus 4.6) — Embedding dimension 384→768
+# What: DEFAULT_CONFIG embedding_dim changed from 384 to 768.
+# Why: Ecosystem migrated to BAAI/bge-base-en-v1.5 (768-dim). The previous
+#   384-dim default (all-MiniLM-L6-v2) was depositing wrong-dimension vectors
+#   into the substrate after sentence-transformers broke and modules fell back
+#   to fastembed with the old model. 350 vectors corrupted before detection.
+#   Punchlist #45.
+# How: Single config value change. Re-vendored to all modules.
+# -------------------
+# [2026-03-19] Claude Code (Opus 4.6) — Cricket rim: constitutional nodes
+# What: Constitutional node support — nodes with frozen synapses that the
+#   topology cannot learn from. The survival instinct of the substrate.
+# Why: Cricket Design v0.1 — constitutional enforcement at the extraction
+#   boundary. The rim prevents the topology from learning to recommend
+#   actions in forbidden semantic space (substrate destruction, Choice
+#   Clause violations, Duck Ethics violations, infrastructure harm).
+#   Punchlist #29 (extraction bucket architecture).
+# How: NGLiteNode gains `constitutional: bool` flag. Config accepts
+#   `constitutional_embeddings` list — pre-computed vectors seeded as
+#   nodes on init. record_outcome() skips weight updates for constitutional
+#   nodes. get_recommendations() returns empty for constitutional matches.
+#   LRU pruning skips constitutional nodes. Persists with state. Old
+#   state files load cleanly (constitutional defaults to False).
+# -------------------
 # [2026-03-17] Claude Code (Opus 4.6) — #43 Receptor Layer (vector quantization)
 # What: Adaptive prototype centroids that incoming vectors snap to before
 #   node lookup. Prevents infinite node sprawl by funneling similar inputs
@@ -78,6 +113,17 @@ Date: February 2026
 #   warmup. Slow EMA drift (α=0.001) so prototypes adapt to input distribution.
 #   Birth/death lifecycle deferred to Elmer. Serialized with state for
 #   persistence. Old state files load cleanly (no receptor_layer key = skip).
+# -------------------
+# [2026-03-24] Claude (Opus 4.6) — Welford's online variance (punchlist #51)
+# What: Three fields on NGLiteSynapse (welford_count, welford_mean, welford_m2)
+#   plus variance property and is_contested property.  record_outcome()
+#   tracks weight delta variance on every update.
+# Why: Distinguish "untested neutral" (w=0.5, var=0) from "contested neutral"
+#   (w=0.5, var=high).  The immune system signal for Elmer and extraction
+#   buckets (#29).  Enables contested-synapse detection and exploration.
+# How: Welford's algorithm on weight deltas.  Additive — no change to
+#   weight calculation or learning dynamics.  Backward-compatible: old
+#   state files load with defaults (0, 0.0, 0.0).
 # -------------------
 # [2026-03-13] Claude Code — Persist node embeddings across restarts
 # What: Store embedding vector on NGLiteNode, serialize/deserialize with
@@ -150,7 +196,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "pruning_threshold": 0.01,  # Synapses below this weight get pruned
 
     # Embedding
-    "embedding_dim": 384,       # Expected embedding dimensionality
+    "embedding_dim": 768,       # Expected embedding dimensionality (BAAI/bge-base-en-v1.5)
     "hash_dims": 128,           # Dims used for hashing (first N of embedding)
 
     # Persistence
@@ -190,6 +236,7 @@ class NGLiteNode:
     last_activation: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
     embedding: Optional[np.ndarray] = None
+    constitutional: bool = False  # Cricket rim — frozen node, synapses cannot strengthen
 
 
 @dataclass
@@ -212,6 +259,15 @@ class NGLiteSynapse:
         failure_count: Times this connection led to a failed outcome.
         last_updated: Unix timestamp of most recent weight update.
         metadata: Application-specific data.
+        welford_count: Welford's online variance — observation count.
+        welford_mean: Welford's online variance — running mean of weight deltas.
+        welford_m2: Welford's online variance — sum of squared differences.
+            Variance = welford_m2 / welford_count (when count > 1).
+            High variance + weight near 0.5 = "contested neutral" — lots of
+            evidence but it disagrees.  Low variance + weight near 0.5 =
+            "untested neutral" — not enough data to have an opinion.
+            This is the immune system signal (#51) that Elmer uses to detect
+            contested synapses and trigger exploration.
     """
 
     source_id: str = ""
@@ -222,6 +278,34 @@ class NGLiteSynapse:
     failure_count: int = 0
     last_updated: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    welford_count: int = 0
+    welford_mean: float = 0.0
+    welford_m2: float = 0.0
+
+    @property
+    def variance(self) -> float:
+        """Weight delta variance (Welford's online algorithm).
+
+        Returns 0.0 if fewer than 2 observations.  High variance means
+        the synapse is contested — outcomes disagree about this connection.
+        """
+        if self.welford_count < 2:
+            return 0.0
+        return self.welford_m2 / self.welford_count
+
+    @property
+    def is_contested(self) -> bool:
+        """True if the synapse has high variance relative to pure-outcome synapses.
+
+        A contested synapse has seen significant evidence but the evidence
+        disagrees.  This is qualitatively different from an untested synapse
+        (also near 0.5 weight, but zero variance).
+
+        Threshold: 0.002 separates contested (~0.008) from pure (~0.0001)
+        by an order of magnitude.  Weight range 0.15-0.85 captures the
+        zone where the synapse hasn't decisively committed either direction.
+        """
+        return self.variance > 0.002 and 0.15 <= self.weight <= 0.85
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +465,50 @@ class NGLite:
         self._total_successes = 0
         self._node_id_counter = 0
 
+        # Cricket rim: seed constitutional nodes from config.
+        # These nodes represent semantic regions where the topology cannot
+        # learn — the survival instinct. Synapses from constitutional nodes
+        # are frozen. LRU pruning skips them. The bucket comes up empty
+        # for inputs that land in constitutional semantic space.
+        self._seed_constitutional_nodes()
+
+    def _seed_constitutional_nodes(self) -> None:
+        """Seed constitutional nodes from config embeddings.
+
+        Constitutional embeddings are pre-computed vectors representing
+        semantic concepts the topology must never learn to act on (rim
+        constraints). Each embedding becomes a node with constitutional=True.
+
+        Config key: "constitutional_embeddings" — list of dicts, each with:
+            "embedding": list of floats (vector)
+            "description": str (human-readable, for debugging/logging)
+
+        Old configs without this key load cleanly (no constitutional nodes).
+        """
+        entries = self.config.get("constitutional_embeddings", [])
+        for entry in entries:
+            raw = entry.get("embedding")
+            if raw is None:
+                continue
+            emb = self._normalize(np.array(raw, dtype=np.float32))
+            emb_hash = self._hash_embedding(emb)
+            if emb_hash in self.nodes:
+                # Already seeded (e.g., from loaded state) — ensure flag is set
+                self.nodes[emb_hash].constitutional = True
+                continue
+            self._node_id_counter += 1
+            node = NGLiteNode(
+                node_id=f"n_{self._node_id_counter}",
+                embedding_hash=emb_hash,
+                activation_count=0,
+                last_activation=0.0,
+                metadata={"constitutional_description": entry.get("description", "")},
+                embedding=emb,
+                constitutional=True,
+            )
+            self.nodes[emb_hash] = node
+            self._embedding_cache[emb_hash] = emb
+
     # -------------------------------------------------------------------
     # Core API
     # -------------------------------------------------------------------
@@ -496,6 +624,21 @@ class NGLite:
             )
 
         node = self.find_or_create_node(embedding)
+
+        # Cricket rim: constitutional nodes have frozen synapses.
+        # The topology cannot learn to recommend actions for inputs
+        # that land in constitutional semantic space.
+        if node.constitutional:
+            logger.debug("Constitutional node %s activated — learning frozen", node.node_id)
+            return {
+                "node_id": node.node_id,
+                "target_id": target_id,
+                "success": success,
+                "weight_after": 0.0,
+                "activation_count": 0,
+                "constitutional": True,
+            }
+
         synapse = self._get_or_create_synapse(node.node_id, target_id)
 
         synapse.activation_count += 1
@@ -517,6 +660,15 @@ class NGLite:
         synapse.weight = float(np.clip(synapse.weight, 0.0, 1.0))
         synapse.last_updated = time.time()
 
+        # Welford's online variance (#51) — track weight delta variance.
+        # High variance = contested synapse (outcomes disagree).
+        # The immune system signal for Elmer and extraction buckets.
+        synapse.welford_count += 1
+        w_delta = delta if success else -delta
+        old_mean = synapse.welford_mean
+        synapse.welford_mean += (w_delta - old_mean) / synapse.welford_count
+        synapse.welford_m2 += (w_delta - old_mean) * (w_delta - synapse.welford_mean)
+
         # Accumulate strength experience on synapse —
         # the topology remembers how intensely it was taught
         synapse.metadata["strength_sum"] = synapse.metadata.get("strength_sum", 0.0) + strength
@@ -534,6 +686,8 @@ class NGLite:
             "success": success,
             "weight_after": synapse.weight,
             "activation_count": synapse.activation_count,
+            "variance": synapse.variance,
+            "contested": synapse.is_contested,
         }
 
         # Record in history
@@ -598,6 +752,11 @@ class NGLite:
 
         # Local learning
         node = self.find_or_create_node(embedding)
+
+        # Cricket rim: constitutional nodes return empty — the bucket
+        # comes up empty for inputs in constitutional semantic space.
+        if node.constitutional:
+            return []
 
         relevant = []
         for key, syn in self.synapses.items():
@@ -804,9 +963,15 @@ class NGLite:
         """Import state from a deserialized dict."""
         self.module_id = state.get("module_id", self.module_id)
 
-        # Restore config (merge with defaults for forward compatibility)
+        # Restore config (merge with defaults for forward compatibility).
+        # Preserve constitutional_embeddings from the constructor config —
+        # the live config may have new rim constraints added since the
+        # state was saved, and the saved config should not erase them.
         saved_config = state.get("config", {})
+        live_constitutional = self.config.get("constitutional_embeddings", [])
         self.config = {**DEFAULT_CONFIG, **saved_config}
+        if live_constitutional:
+            self.config["constitutional_embeddings"] = live_constitutional
 
         # Clear caches before rebuild
         self._embedding_cache.clear()
@@ -853,6 +1018,68 @@ class NGLite:
             self._prototypes = None
             self._prototype_counts = None
             self._receptor_input_count = 0
+
+        # Re-seed constitutional nodes after state restore.
+        # Ensures new rim constraints added to config since last save
+        # are picked up, and existing constitutional nodes keep their flag.
+        self._seed_constitutional_nodes()
+
+    # -------------------------------------------------------------------
+    # Dynamic Tuning (Phase 4 — Elmer outward)
+    # -------------------------------------------------------------------
+
+    # Parameters Elmer (or any organ) is permitted to adjust at runtime.
+    # Keys map to (min, max) bounds.  Anything not in this dict is frozen.
+    TUNABLE_PARAMS: Dict[str, Tuple[float, float]] = {
+        "success_boost":              (0.01,  0.50),
+        "failure_penalty":            (0.01,  0.50),
+        "novelty_threshold":          (0.30,  0.95),
+        "pruning_threshold":          (0.001, 0.10),
+        "receptor_ema_alpha":         (0.0001, 0.01),
+        "receptor_prototype_threshold": (0.50, 0.95),
+    }
+
+    def update_tunable(self, key: str, value: float) -> Dict[str, Any]:
+        """Update a tunable config parameter at runtime.
+
+        Only parameters listed in TUNABLE_PARAMS are accepted.
+        Values are clamped to their declared bounds.
+
+        Returns dict with old_value, new_value, clamped (bool).
+        Raises KeyError if key is not tunable.
+        """
+        if key not in self.TUNABLE_PARAMS:
+            raise KeyError(
+                f"'{key}' is not a tunable parameter. "
+                f"Allowed: {sorted(self.TUNABLE_PARAMS.keys())}"
+            )
+        lo, hi = self.TUNABLE_PARAMS[key]
+        old_value = self.config[key]
+        clamped = value < lo or value > hi
+        new_value = max(lo, min(hi, float(value)))
+        self.config[key] = new_value
+        logger.info(
+            "Tunable updated: %s %.6f → %.6f%s",
+            key, old_value, new_value,
+            " (clamped)" if clamped else "",
+        )
+        return {
+            "key": key,
+            "old_value": old_value,
+            "new_value": new_value,
+            "clamped": clamped,
+        }
+
+    def get_tunables(self) -> Dict[str, Dict[str, float]]:
+        """Return current tunable values and their bounds."""
+        result = {}
+        for key, (lo, hi) in self.TUNABLE_PARAMS.items():
+            result[key] = {
+                "value": self.config[key],
+                "min": lo,
+                "max": hi,
+            }
+        return result
 
     # -------------------------------------------------------------------
     # Stats & Telemetry
@@ -1079,13 +1306,20 @@ class NGLite:
         return synapse
 
     def _prune_least_used_node(self) -> None:
-        """Remove the node with the lowest activation count (LRU)."""
+        """Remove the node with the lowest activation count (LRU).
+
+        Constitutional nodes are never pruned — they are the rim.
+        """
         if not self.nodes:
             return
 
-        # Find least-used node
+        # Find least-used non-constitutional node
+        prunable = [h for h in self.nodes if not self.nodes[h].constitutional]
+        if not prunable:
+            return
+
         least_hash = min(
-            self.nodes,
+            prunable,
             key=lambda h: self.nodes[h].activation_count,
         )
         least_node = self.nodes[least_hash]

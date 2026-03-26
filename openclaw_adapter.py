@@ -1,6 +1,21 @@
 """
 OpenClaw Adapter — E-T Systems Module Integration for OpenClaw Skills
 
+# ---- Changelog ----
+# [2026-03-26] Claude (Opus 4.6) — Domain-specific substrate outcomes (punchlist #18)
+#   What: on_message() now runs _module_on_message() BEFORE record_outcome().
+#     Modules can return _substrate_target_id and _substrate_success in their
+#     result dict to provide domain-specific outcomes to the substrate.
+#   Why:  success=True was hardcoded — the substrate never learned whether
+#     domain actions (scans, repairs, routing) actually worked or failed.
+#     The River carried undifferentiated "I saw a message" instead of
+#     "my scan found a threat" or "my repair worked."
+#   How:  _module_on_message() runs first.  Adapter pops _substrate_target_id
+#     and _substrate_success from the result dict (if present).  Falls back
+#     to message:{count} / True if module doesn't declare outcomes.
+#     Backward-compatible — modules that don't return these keys work unchanged.
+# -------------------
+
 Bridges the framework-agnostic NGEcosystem to OpenClaw's skill interface.
 Any E-T Systems module that wants to function as an OpenClaw skill vendors
 this file alongside ng_ecosystem.py and ng_lite.py.
@@ -31,6 +46,11 @@ Usage (inside a module's openclaw hook file):
         def _module_on_message(self, text: str, embedding: "np.ndarray") -> dict:
             # Module-specific processing (scan, route, classify, etc.)
             # Return a dict to merge into the on_message result.
+            #
+            # Optional substrate keys (adapter reads these if present):
+            #   _substrate_target_id: str  — domain-specific target (e.g., "scan:clean")
+            #   _substrate_success: bool   — did the domain action succeed?
+            # If omitted, defaults to target_id="message:{count}", success=True.
             return {}
 
         def _module_stats(self) -> dict:
@@ -187,16 +207,27 @@ class OpenClawAdapter(ABC):
 
         embedding = self._embed(text)
 
+        # Module-specific processing (runs first — determines outcome)
+        module_results = self._module_on_message(text, embedding)
+
         # Record to ecosystem (Tier 1/2/3 transparently)
+        # Modules can declare domain-specific target_id and success
+        # via _substrate_target_id and _substrate_success in their return dict.
+        # If absent, falls back to generic message recording.
+        substrate_target = module_results.pop(
+            "_substrate_target_id",
+            f"message:{self._message_count}",
+        )
+        substrate_success = module_results.pop(
+            "_substrate_success",
+            True,
+        )
         self._eco.record_outcome(
             embedding,
-            target_id=f"message:{self._message_count}",
-            success=True,
+            target_id=substrate_target,
+            success=substrate_success,
             metadata={"source": "openclaw", "module": self.MODULE_ID},
         )
-
-        # Module-specific processing
-        module_results = self._module_on_message(text, embedding)
 
         # Context from ecosystem
         ctx = self._eco.get_context(embedding)

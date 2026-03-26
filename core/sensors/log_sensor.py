@@ -71,6 +71,7 @@ class LogSensor(Sensor):
         self._auth_fail_threshold = self._config.get(
             "auth_failure_threshold", 5
         )
+        self._max_log_line = self._config.get("max_log_line_chars", 500)
 
         # File position tracking for tailing
         self._file_positions: Dict[str, int] = {}
@@ -169,7 +170,7 @@ class LogSensor(Sensor):
             event = {
                 "event_type": "auth_failure",
                 "source": source,
-                "line": line[:500],
+                "line": line[:self._max_log_line],
                 "auth_source": src,
                 "timestamp": time.time(),
             }
@@ -184,7 +185,7 @@ class LogSensor(Sensor):
             event = {
                 "event_type": "sudo_usage",
                 "source": source,
-                "line": line[:500],
+                "line": line[:self._max_log_line],
                 "timestamp": time.time(),
             }
 
@@ -193,7 +194,7 @@ class LogSensor(Sensor):
             event = {
                 "event_type": "ssh_key_event",
                 "source": source,
-                "line": line[:500],
+                "line": line[:self._max_log_line],
                 "timestamp": time.time(),
             }
 
@@ -202,7 +203,7 @@ class LogSensor(Sensor):
             event = {
                 "event_type": "service_change",
                 "source": source,
-                "line": line[:500],
+                "line": line[:self._max_log_line],
                 "timestamp": time.time(),
             }
 

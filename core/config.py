@@ -9,6 +9,11 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-03-19] Claude Code (Opus 4.6) — Migrate to BAAI/bge-base-en-v1.5 (#45)
+# What: EmbeddingConfig defaults → BAAI/bge-base-en-v1.5, dim → 768.
+# Why: Ecosystem-wide embedding migration. Punchlist #45.
+# How: Model string and dim default changes.
+# -------------------
 # [2026-02-28] Claude (Opus 4.6) — Initial creation.
 #   What: ImmunisConfig dataclass with from_yaml() class method.
 #         All default values match PRD §11 exactly.
@@ -187,8 +192,8 @@ class NGLiteConfig:
 
 @dataclass
 class EmbeddingConfig:
-    model: str = "sentence-transformers/all-MiniLM-L6-v2"  # fastembed uses same model ID
-    dim: int = 384
+    model: str = "BAAI/bge-base-en-v1.5"
+    dim: int = 768
     device: str = "auto"
     fallback_to_hash: bool = True
 
