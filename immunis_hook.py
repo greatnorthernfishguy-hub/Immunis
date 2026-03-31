@@ -21,6 +21,17 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-03-28] Claude Code (Opus 4.6) — Add autonomous pulse loop (#109)
+#   What: Added _pulse_loop() daemon thread that continuously polls sensors,
+#         feeds Quartermaster, processes batch, checks autonomic transitions,
+#         and auto-checkpoints — the same work _module_on_message does, running
+#         between conversations so the immune system never sleeps.
+#   Why:  #109 — Organs must be alive between conversations. Immunis only
+#         scanned during active chat turns. A T-cell system must monitor
+#         continuously.
+#   How:  Follows the Tonic pattern (tonic_engine.py lines 484-507). Daemon
+#         thread with _shutdown_event.wait(timeout=interval). Resting 10s,
+#         conversation 5s. on_conversation_started/ended for mode swap.
 # [2026-02-28] Claude (Opus 4.6) — Initial creation (all 4 phases).
 #   What: ImmunisHook class subclassing OpenClawAdapter. Initializes
 #         all core components: config, sensors, Quartermaster, Armory,
@@ -184,6 +195,12 @@ class ImmunisHook(OpenClawAdapter):
         self._last_checkpoint = time.time()
         self._checkpoint_interval = self._cfg.checkpoint_interval_seconds
 
+        # --- Pulse Loop (#109) ---
+        self._shutdown_event = threading.Event()
+        self._in_conversation = False
+        self._resting_interval = 10.0
+        self._conversation_interval = 5.0
+
         logger.info(
             "[Immunis] Initialized — %d sensors active, "
             "training_wheels=%s, autonomic=%s",
@@ -191,6 +208,12 @@ class ImmunisHook(OpenClawAdapter):
             self._feedback.is_training_wheels_active(),
             self._autonomic_state,
         )
+
+        # Start pulse thread at end of __init__ (daemon=True)
+        self._pulse_thread = threading.Thread(
+            target=self._pulse_loop, name="immunis-pulse", daemon=True
+        )
+        self._pulse_thread.start()
 
     def _init_sensors(self) -> None:
         """Initialize all enabled sensors (PRD §5)."""
@@ -276,6 +299,83 @@ class ImmunisHook(OpenClawAdapter):
                 pass
 
         return self._hash_embed(text)
+
+    # -----------------------------------------------------------------
+    # Autonomous Pulse Loop (#109)
+    # -----------------------------------------------------------------
+
+    def _pulse_loop(self) -> None:
+        """Continuous autonomous pulse — Immunis scans between conversations.
+
+        Follows the Tonic pattern (tonic_engine.py lines 484-507).
+        Each cycle does the same sensor polling and pipeline processing
+        that _module_on_message does, so the immune system never sleeps.
+        """
+        while not self._shutdown_event.is_set():
+            try:
+                self._pulse_cycle()
+            except Exception as exc:
+                logger.debug("Pulse cycle error: %s", exc)
+            interval = (
+                self._conversation_interval
+                if self._in_conversation
+                else self._resting_interval
+            )
+            self._shutdown_event.wait(timeout=interval)
+
+    def _pulse_cycle(self) -> None:
+        """One autonomous pulse cycle — poll sensors, triage, checkpoint."""
+        if self._killed:
+            return
+
+        # 1. Poll all enabled sensors
+        total_signals = 0
+        for sensor in self._sensors:
+            try:
+                signals = sensor.collect_signals()
+                if signals:
+                    self._quartermaster.ingest_signals(signals)
+                    total_signals += len(signals)
+            except Exception as exc:
+                logger.debug("Sensor poll error (%s): %s", sensor.SENSOR_TYPE, exc)
+
+        # 2. Process pipeline
+        pipeline_results = self._quartermaster.process_batch(max_count=50)
+
+        # 3. Check autonomic state transitions
+        self._check_autonomic_transitions(pipeline_results)
+
+        # 4. Process pending feedback responses
+        self._feedback.process_responses()
+
+        # 5. Update training wheels state
+        self._quartermaster._training_wheels = (
+            self._feedback.is_training_wheels_active()
+        )
+
+        # 6. Auto-checkpoint if interval exceeded
+        now = time.time()
+        if now - self._last_checkpoint > self._checkpoint_interval:
+            self._checkpoint()
+            self._last_checkpoint = now
+
+        if total_signals > 0 or pipeline_results:
+            logger.debug(
+                "[Immunis] Pulse: %d signals, %d processed",
+                total_signals, len(pipeline_results),
+            )
+
+    def on_conversation_started(self) -> None:
+        """Mode swap: shorter polling interval during conversation."""
+        self._in_conversation = True
+
+    def on_conversation_ended(self) -> None:
+        """Mode swap: longer polling interval between conversations."""
+        self._in_conversation = False
+
+    # -----------------------------------------------------------------
+    # OpenClawAdapter implementation
+    # -----------------------------------------------------------------
 
     def _module_on_message(
         self, text: str, embedding: np.ndarray
@@ -474,7 +574,8 @@ class ImmunisHook(OpenClawAdapter):
     # -----------------------------------------------------------------
 
     def shutdown(self) -> None:
-        """Graceful shutdown — checkpoint and stop sensors."""
+        """Graceful shutdown — stop pulse thread, checkpoint, stop sensors."""
+        self._shutdown_event.set()
         self._checkpoint()
         for sensor in self._sensors:
             if hasattr(sensor, "shutdown"):

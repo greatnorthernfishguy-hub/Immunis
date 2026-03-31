@@ -138,7 +138,7 @@ class FeedbackManager:
         self._pending.append(request)
         self._save_queue()
 
-        logger.info(
+        logger.debug(
             "[Feedback] Request %s: %s (severity=%s, confidence=%.2f)",
             request_id, " | ".join(summary_parts), severity_str, confidence,
         )
