@@ -259,7 +259,7 @@ class FeedbackManager:
         # Check substrate outcomes
         if self._eco is not None:
             try:
-                stats = self._eco.stats()
+                stats = self._eco.stats() if self._eco else {"total_outcomes": 0}
                 outcomes = stats.get("total_outcomes", 0)
                 if outcomes < self._min_outcomes:
                     return True

@@ -227,7 +227,7 @@ class Quartermaster:
         # Step 2: Substrate-based classification (novel path)
         if self._eco is not None:
             try:
-                ctx = self._eco.get_context(signal.embedding)
+                ctx = self._eco.get_context(signal.embedding) if self._eco else {"recommendations": [], "novelty": 0.5}
                 classification.substrate_novelty = ctx.get("novelty", 1.0)
 
                 recs = ctx.get("recommendations", [])
@@ -457,7 +457,7 @@ class Quartermaster:
             return False
 
         try:
-            self._eco.record_outcome(
+            if self._eco: self._eco.record_outcome(
                 embedding=classification.signal.embedding,
                 target_id=f"threat:{classification.signal.signal_id}",
                 success=response.status == "success",
@@ -541,7 +541,7 @@ class Quartermaster:
             return
 
         try:
-            self._eco.record_outcome(
+            if self._eco: self._eco.record_outcome(
                 embedding=result.classification.signal.embedding,
                 target_id=f"response:{result.response.primitive_name}",
                 success=effective,

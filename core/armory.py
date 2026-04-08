@@ -270,7 +270,7 @@ class Armory:
             # Substrate augmentation (Phase 3)
             if self._eco is not None:
                 try:
-                    novelty = self._eco.detect_novelty(embedding)
+                    novelty = self._eco.detect_novelty(embedding) if self._eco else 0.5
                     # Lower novelty = more substrate confidence = boost score
                     score *= (1.0 + (1.0 - novelty) * 0.5)
                 except Exception:

@@ -76,6 +76,7 @@ class ImmunisHook(OpenClawAdapter):
     """OpenClaw integration hook for Immunis (PRD §10.3)."""
 
     MODULE_ID = "immunis"
+    SKIP_ECOSYSTEM = True
     SKILL_NAME = "Immunis System Security"
     WORKSPACE_ENV = "IMMUNIS_WORKSPACE_DIR"
     DEFAULT_WORKSPACE = "~/.openclaw/immunis"
@@ -123,7 +124,7 @@ class ImmunisHook(OpenClawAdapter):
                 "eviction_policy": self._cfg.armory.eviction_policy,
             },
             data_dir=str(self._data_dir),
-            ecosystem=self._eco,
+            ecosystem=None,
         )
 
         # --- Initialize Response Primitives (PRD §7) ---
@@ -152,7 +153,7 @@ class ImmunisHook(OpenClawAdapter):
             },
             data_dir=str(self._data_dir),
             armory=self._armory,
-            ecosystem=self._eco,
+            ecosystem=None,
         )
 
         # --- Initialize Quartermaster (PRD §4) ---
@@ -171,7 +172,7 @@ class ImmunisHook(OpenClawAdapter):
                 },
             },
             armory=self._armory,
-            ecosystem=self._eco,
+            ecosystem=None,
             response_primitives=self._primitives,
             feedback=self._feedback,
             threat_logger=self._log_threat,
@@ -380,71 +381,12 @@ class ImmunisHook(OpenClawAdapter):
     def _module_on_message(
         self, text: str, embedding: np.ndarray
     ) -> Dict[str, Any]:
-        """Immunis-specific processing on each OpenClaw message.
+        """No-op — Immunis processes autonomously via pulse cycle.
 
-        1. Poll all sensors for new signals
-        2. Feed signals to the Quartermaster
-        3. Process pipeline
-        4. Check autonomic state transitions
-        5. Process feedback responses
-        6. Auto-checkpoint
+        Sensor polling, pipeline processing, and autonomic state checks
+        all run on the pulse loop. No conversation text needed.
         """
-        if self._killed:
-            return {"status": "killed", "reason": "Emergency kill switch active"}
-
-        result: Dict[str, Any] = {"status": "ok"}
-
-        # 1. Poll sensors
-        total_signals = 0
-        for sensor in self._sensors:
-            try:
-                signals = sensor.collect_signals()
-                if signals:
-                    self._quartermaster.ingest_signals(signals)
-                    total_signals += len(signals)
-            except Exception as exc:
-                logger.debug("Sensor poll error (%s): %s", sensor.SENSOR_TYPE, exc)
-
-        # 2. Process pipeline
-        pipeline_results = self._quartermaster.process_batch(max_count=50)
-
-        # 3. Check for autonomic state transitions (PRD §8.4)
-        self._check_autonomic_transitions(pipeline_results)
-
-        # 4. Process pending feedback responses
-        self._feedback.process_responses()
-
-        # 5. Update training wheels state
-        self._quartermaster._training_wheels = (
-            self._feedback.is_training_wheels_active()
-        )
-
-        # 6. Auto-checkpoint
-        now = time.time()
-        if now - self._last_checkpoint > self._checkpoint_interval:
-            self._checkpoint()
-            self._last_checkpoint = now
-
-        # Build result
-        active_threats = self._quartermaster.active_threats
-        result["signals_ingested"] = total_signals
-        result["pipeline_processed"] = len(pipeline_results)
-        result["active_threats"] = len(active_threats)
-        result["autonomic_state"] = self._autonomic_state
-        result["training_wheels"] = self._feedback.is_training_wheels_active()
-        result["buffer_size"] = self._quartermaster.buffer_size
-
-        if active_threats:
-            result["threat_summary"] = [
-                {
-                    "severity": t.assessment.severity.value if t.assessment else "unknown",
-                    "category": t.classification.category if t.classification else "unknown",
-                    "signal_id": t.signal.signal_id,
-                }
-                for t in active_threats[:5]
-            ]
-
-        return result
+        return {}
 
     def _module_stats(self) -> Dict[str, Any]:
         """Immunis-specific telemetry."""
@@ -565,7 +507,7 @@ class ImmunisHook(OpenClawAdapter):
             logger.warning("Armory checkpoint failed: %s", exc)
 
         try:
-            self._eco.save()
+            pass  # state persisted via tracts
         except Exception as exc:
             logger.debug("Ecosystem checkpoint failed: %s", exc)
 
