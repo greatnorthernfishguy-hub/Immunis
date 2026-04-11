@@ -128,6 +128,14 @@ class FilesystemSensor(Sensor):
         except ImportError:
             logger.info("watchdog not available — using poll-based fallback")
             self._observer = None
+        except OSError as exc:
+            logger.info("watchdog observer failed to start (%s) — using poll-based fallback", exc)
+            if self._observer is not None:
+                try:
+                    self._observer.stop()
+                except Exception:
+                    pass
+            self._observer = None
 
     def _poll(self) -> List[Dict[str, Any]]:
         """Drain the watchdog event queue."""

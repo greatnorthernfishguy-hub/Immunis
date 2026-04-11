@@ -8,6 +8,17 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-04-08] Claude (Sonnet 4.6) — Ecosystem process log monitoring.
+#   What: Added ecosystem WARNING/ERROR pattern matching alongside
+#         existing security patterns. Produces ecosystem_warning and
+#         ecosystem_error event types from neurograph-rpc log output.
+#         Uses ng_embed (semantic) for these events so similar failures
+#         cluster in the substrate — enabling THC to recognize patterns.
+#   Why:  THC needs ecosystem failure signals from the River to trigger
+#         diagnosis and repair. Immunis already watches journalctl;
+#         pointing it at [neurograph-rpc] WARNING/ERROR lines closes
+#         the loop between real ecosystem failures and THC's detection
+#         pipeline. Existing security patterns unchanged.
 # [2026-02-28] Claude (Opus 4.6) — Initial creation.
 #   What: LogSensor class monitoring auth failures, brute force,
 #         sudo usage, SSH key changes, service start/stop.
@@ -57,6 +68,33 @@ class LogSensor(Sensor):
     )
     _SERVICE_RE = re.compile(
         r"(Started|Stopped|Starting|Stopping)\s+\S+", re.IGNORECASE,
+    )
+
+    # Ecosystem process health patterns — neurograph-rpc WARNING/ERROR output.
+    # These feed THC's detection pipeline via the substrate River.
+    _ECOSYSTEM_WARNING_RE = re.compile(
+        r"\[neurograph-rpc\]\s+WARNING"
+        r"|\[py\].*WARNING.*(?:failed|error|missing|invalid)",
+        re.IGNORECASE,
+    )
+    _ECOSYSTEM_ERROR_RE = re.compile(
+        r"\[neurograph-rpc\]\s+ERROR"
+        r"|Python process exited"
+        r"|\[py\].*ERROR",
+        re.IGNORECASE,
+    )
+
+    # Ecosystem process health patterns — neurograph-rpc WARNING/ERROR output.
+    # These feed THC's detection pipeline via the substrate River.
+    _ECOSYSTEM_WARNING_RE = re.compile(
+        r"\[neurograph-rpc\]\s+WARNING|\[py\].*WARNING.*(?:failed|error|missing|invalid)",
+        re.IGNORECASE,
+    )
+    _ECOSYSTEM_ERROR_RE = re.compile(
+        r"\[neurograph-rpc\]\s+ERROR"
+        r"|Python process exited"
+        r"|\[py\].*ERROR",
+        re.IGNORECASE,
     )
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -207,6 +245,24 @@ class LogSensor(Sensor):
                 "timestamp": time.time(),
             }
 
+        # Ecosystem process error — feeds THC detection pipeline
+        elif self._ECOSYSTEM_ERROR_RE.search(line):
+            event = {
+                "event_type": "ecosystem_error",
+                "source": source,
+                "line": line[:self._max_log_line],
+                "timestamp": time.time(),
+            }
+
+        # Ecosystem process warning — feeds THC detection pipeline
+        elif self._ECOSYSTEM_WARNING_RE.search(line):
+            event = {
+                "event_type": "ecosystem_warning",
+                "source": source,
+                "line": line[:self._max_log_line],
+                "timestamp": time.time(),
+            }
+
         return event
 
     @staticmethod
@@ -237,15 +293,22 @@ class LogSensor(Sensor):
         return len(self._auth_failures[source]) >= self._auth_fail_threshold
 
     def _embed(self, event: Dict[str, Any]) -> np.ndarray:
-        """Embed a log event using hash-based embedding.
+        """Embed a log event.
 
-        PRD §5.5: Log entries are text, use hash-based embedding for
-        consistency with substrate topology. Prefer sentence-transformer
-        if available (configurable).
+        PRD §5.5: Security events use hash-based embedding for consistency.
+        Ecosystem events (ecosystem_warning, ecosystem_error) use ng_embed
+        so similar failures cluster semantically in the substrate — enabling
+        THC to recognise patterns across restarts via cosine similarity.
         """
         line = event.get("line", "")
         etype = event.get("event_type", "unknown")
-
-        # Combine event type with line content for richer embedding
         text = f"{etype}:{line}"
+
+        if etype in ("ecosystem_warning", "ecosystem_error"):
+            try:
+                from ng_embed import embed
+                return embed(text)
+            except Exception:
+                pass  # fall through to hash
+
         return self._hash_embed(text)
