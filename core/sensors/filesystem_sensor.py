@@ -9,6 +9,15 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-04-17] Claude Code (Sonnet 4.6) — Watchdog scheduled on sensitive_paths, not watched_paths (#117)
+#   What: _init_watchdog() now schedules inotify watches on self._sensitive_paths (6 specific
+#         dirs) rather than self._watched_paths (default: "/"). Each path uses recursive=False.
+#         Early-return with poll fallback added when no sensitive paths exist yet.
+#   Why:  Watching "/" recursively exceeds Linux inotify watch limits — Observer.start() raised
+#         FileNotFoundError caught by except OSError, leaving the sensor in poll-only mode.
+#         Real-time filesystem intrusion detection was permanently offline (#117).
+#   How:  Replaced `for wp in self._watched_paths` loop with `for sp in self._sensitive_paths`
+#         loop. Added `scheduled` list for accurate log output.
 # [2026-02-28] Claude (Opus 4.6) — Initial creation.
 #   What: FilesystemSensor class monitoring file create/modify/delete/
 #         move/permission events. Uses watchdog for real-time events,
@@ -116,14 +125,20 @@ class FilesystemSensor(Sensor):
                         pass
 
             self._observer = Observer()
-            for wp in self._watched_paths:
-                if os.path.exists(wp):
-                    self._observer.schedule(
-                        _Handler(), wp, recursive=True
-                    )
+            # Schedule on sensitive_paths — specific dirs manageable for inotify.
+            # watched_paths defaults to "/" which exceeds inotify watch limits (#117).
+            scheduled = []
+            for sp in self._sensitive_paths:
+                if os.path.exists(sp):
+                    self._observer.schedule(_Handler(), sp, recursive=False)
+                    scheduled.append(sp)
+            if not scheduled:
+                self._observer = None
+                logger.info("No sensitive paths exist yet — using poll-based fallback")
+                return
             self._observer.daemon = True
             self._observer.start()
-            logger.info("Watchdog observer started for %s", self._watched_paths)
+            logger.info("Watchdog observer started for sensitive paths: %s", scheduled)
 
         except ImportError:
             logger.info("watchdog not available — using poll-based fallback")
