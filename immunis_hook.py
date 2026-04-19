@@ -21,6 +21,10 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-04-19] Claude Code — #5: _pulse_cycle() now drains River tracts via _drain_river()
+#   What: Added self._drain_river() at start of _pulse_cycle()
+#   Why: #5 — extraction bucket architecture; modules must pull from the ONE substrate
+#   How: _drain_river() on openclaw_adapter.py base class handles BTF tract drain
 # [2026-03-28] Claude Code (Opus 4.6) — Add autonomous pulse loop (#109)
 #   What: Added _pulse_loop() daemon thread that continuously polls sensors,
 #         feeds Quartermaster, processes batch, checks autonomic transitions,
@@ -326,6 +330,7 @@ class ImmunisHook(OpenClawAdapter):
 
     def _pulse_cycle(self) -> None:
         """One autonomous pulse cycle — poll sensors, triage, checkpoint."""
+        self._drain_river()
         if self._killed:
             return
 
