@@ -9,6 +9,15 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-04-29] Claude (Sonnet 4.6) — Add known_good_ports to suppress API false positives
+#   What: NetworkSensor fired new_outbound_connection for every API call to Anthropic,
+#         OpenRouter, HuggingFace, Ollama remotes — all on port 443. These CDN-backed
+#         endpoints rotate IPs constantly, making IP-whitelisting unworkable.
+#         16,624 forensic snapshots and 284MB threat log were all false positives.
+#   Why:  Port 443 (HTTPS) is never an attacker's tool for C2/exfil — they use the
+#         suspicious ports list. Filtering by port is the correct signal boundary here.
+#   How:  Load known_good_ports from config (default: [443, 80]). Skip
+#         new_outbound_connection events for connections on those ports.
 # [2026-02-28] Claude (Opus 4.6) — Initial creation.
 #   What: NetworkSensor class monitoring outbound connections, suspicious
 #         ports, listening ports, connection volume spikes. Reads
@@ -82,6 +91,9 @@ class NetworkSensor(Sensor):
         self._good_dests = set(
             self._config.get("known_good_destinations", ["127.0.0.1", "::1"])
         )
+        self._good_ports = set(
+            self._config.get("known_good_ports", [443, 80])
+        )
         self._max_outbound = self._config.get("max_outbound_connections", 100)
         self._last_connection_count = 0
 
@@ -115,9 +127,10 @@ class NetworkSensor(Sensor):
                     events.append(entry)
                     continue
 
-                # Detect unknown destinations (skip good ones)
+                # Detect unknown destinations (skip good IPs and known-good ports)
                 if (entry.get("state") == "ESTABLISHED"
-                        and entry["remote_ip"] not in self._good_dests):
+                        and entry["remote_ip"] not in self._good_dests
+                        and entry["remote_port"] not in self._good_ports):
                     if conn_key not in self._known_connections and not self._first_poll:
                         entry["event_type"] = "new_outbound_connection"
                         events.append(entry)

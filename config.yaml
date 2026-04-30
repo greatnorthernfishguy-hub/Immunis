@@ -63,6 +63,12 @@ immunis:
         - "sshd"
         - "systemd"
         - "python3"
+        - "ollama"       # model inference — legitimately CPU-heavy
+        - "uvicorn"      # TID API server
+        - "node"         # OpenClaw gateway (Node.js)
+        - "Xorg"         # display server
+        - "xfdesktop"    # desktop environment
+        - "kworker"      # kernel worker threads
       suspicious_locations:
         - "/tmp"
         - "/dev/shm"
@@ -78,6 +84,13 @@ immunis:
       known_good_destinations:
         - "127.0.0.1"
         - "::1"
+      known_good_ports:
+        - 443    # HTTPS — all API calls (Anthropic, OpenRouter, HuggingFace, etc.)
+        - 80     # HTTP
+        - 8847   # NeuroGraph gateway (local)
+        - 8850   # Bunyan sidecar (local)
+        - 7437   # TID API (local)
+        - 7438   # TrollGuard (local)
       max_outbound_connections: 100
     dependency:
       enabled: true
