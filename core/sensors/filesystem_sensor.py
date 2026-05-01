@@ -9,6 +9,12 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-04-30] Claude (Sonnet 4.6) — Filter inotify open/close-read events from watchdog
+#   What: on_any_event now skips 'opened' and 'closed_no_write' events.
+#   Why:  Watchdog's inotify backend surfaces IN_OPEN/IN_CLOSE_NOWRITE for every read
+#         syscall on watched files. These were 98% of events (49k/50k in threat log)
+#         with zero security relevance — only write-path events signal threats.
+#   How:  Added _IGNORED_WATCHDOG_EVENTS module constant; early return in on_any_event.
 # [2026-04-17] Claude Code (Sonnet 4.6) — Watchdog scheduled on sensitive_paths, not watched_paths (#117)
 #   What: _init_watchdog() now schedules inotify watches on self._sensitive_paths (6 specific
 #         dirs) rather than self._watched_paths (default: "/"). Each path uses recursive=False.
@@ -51,6 +57,10 @@ import numpy as np
 from core.sensors.base import EMBEDDING_DIM, Sensor
 
 logger = logging.getLogger("immunis.sensors.filesystem")
+
+# Watchdog inotify events that fire on every read — not security-relevant.
+# IN_OPEN and IN_CLOSE_NOWRITE trigger for any open(2) + close(2) without write.
+_IGNORED_WATCHDOG_EVENTS = frozenset({"opened", "closed_no_write"})
 
 
 class FilesystemSensor(Sensor):
@@ -113,6 +123,8 @@ class FilesystemSensor(Sensor):
             class _Handler(FileSystemEventHandler):
                 def on_any_event(self, event):
                     if event.is_directory:
+                        return
+                    if event.event_type in _IGNORED_WATCHDOG_EVENTS:
                         return
                     try:
                         sensor._event_queue.put_nowait({
