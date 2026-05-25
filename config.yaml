@@ -134,8 +134,8 @@ immunis:
 
   # --- Embedding (PRD §5 sensor embedding) ---
   embedding:
-    model: "sentence-transformers/all-MiniLM-L6-v2"
-    dim: 384
+    model: "Snowflake/snowflake-arctic-embed-m-v1.5"
+    dim: 768
     device: "auto"
     fallback_to_hash: true
 
