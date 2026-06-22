@@ -72,63 +72,12 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from openclaw_adapter import OpenClawAdapter
+try:
+    from ng_commons_eco import CommonsEco   # vendored Commons-backed eco (#335)
+except Exception:
+    CommonsEco = None   # standalone/Tier-1: no Commons → Quartermaster stays substrate-light
 
 logger = logging.getLogger("immunis_hook")
-
-
-class _CommonsEco:
-    """Commons-backed substrate adapter for the Quartermaster (Track-2 Immunis migration, #324).
-
-    # ---- Changelog ----
-    # [2026-06-22] Claude Code (Fable 5) — restore Immunis's substrate SIGHT via the Commons
-    # What: Immunis was substrate-BLIND — SKIP_ECOSYSTEM=True forced ecosystem=None, so the
-    #       Quartermaster classified with empty recommendations + default novelty and NEVER
-    #       recorded outcomes → could never reach the confidence to escalate SYMPATHETIC (one of
-    #       only 3 authorized), and the Armory stayed empty. This adapter gives the Quartermaster
-    #       back its get_context/record_outcome interface, now on the shared Commons (deposit/bucket),
-    #       in-process (Immunis loads in the gateway → reaches get_commons()).
-    # Why: the QG/Bunyan migration pattern — a module deposits its raw experience and buckets what
-    #       it needs from the one shared substrate. Fixes #324.
-    # How: get_context buckets the Commons, FILTERED to Immunis's own threat:/response: namespace
-    #       (on its private NG-Lite its substrate held ONLY its threat deposits; the shared Commons
-    #       holds everyone's — the filter preserves the Quartermaster's threat-classification
-    #       semantics, which key on the threat: prefix, quartermaster.py:239). novelty = 1 - top
-    #       threat-match confidence (high when no known threat matches). record_outcome → raw
-    #       commons.deposit (target_ids are already threat:/response: — Immunis-namespaced). Lazy
-    #       get_commons() so Immunis is never permanently blind; fail-soft.
-    # -------------------
-    """
-
-    @staticmethod
-    def _commons():
-        try:
-            from commons import get_commons
-            return get_commons()
-        except Exception:  # noqa: BLE001 — no Commons (standalone/Tier-1) → graceful
-            return None
-
-    def get_context(self, embedding) -> dict:
-        c = self._commons()
-        if c is None or embedding is None:
-            return {"recommendations": [], "novelty": 1.0}
-        try:
-            recs = c.bucket(embedding, top_k=10)
-        except Exception:  # noqa: BLE001 — a bucket failure never breaks classification
-            return {"recommendations": [], "novelty": 1.0}
-        threat_recs = [r for r in recs if str(r[0]).startswith(("threat:", "response:"))]
-        top_conf = float(threat_recs[0][1]) if threat_recs else 0.0
-        return {"recommendations": threat_recs, "novelty": max(0.0, 1.0 - top_conf)}
-
-    def record_outcome(self, embedding, target_id, success, strength=1.0, metadata=None):
-        c = self._commons()
-        if c is None or embedding is None:
-            return None
-        try:
-            return c.deposit(embedding, target_id, success=success, strength=strength,
-                             metadata=metadata)
-        except Exception as exc:  # noqa: BLE001 — a deposit failure never breaks the response loop
-            logger.debug("Immunis Commons deposit failed: %s", exc)
-            return None
 
 
 class ImmunisHook(OpenClawAdapter):
@@ -231,7 +180,8 @@ class ImmunisHook(OpenClawAdapter):
                 },
             },
             armory=self._armory,
-            ecosystem=_CommonsEco(),   # #324: restore substrate sight via the Commons (was None → blind)
+            # #324/#335: substrate sight via the vendored Commons-backed eco (threat-namespace filtered)
+            ecosystem=(CommonsEco(namespaces=("threat:", "response:"), source_id="immunis") if CommonsEco else None),
             response_primitives=self._primitives,
             feedback=self._feedback,
             threat_logger=self._log_threat,
