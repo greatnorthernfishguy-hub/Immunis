@@ -21,6 +21,21 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-06-22] Claude Code (Opus 4.8) — #328 Step 3 (A): Immunis LISTENS for external threats
+#   What: _bucket_commons_threats() (in the pulse) buckets EXTERNAL violation:*/perimeter:* deposits
+#         (Cricket-rim, TrollGuard) from the Commons and escalates SYMPATHETIC — Immunis is the sole
+#         arousal authority, so it hears others' raw threat/violation experience and decides. Adds a
+#         relaxation HOLD-WINDOW (_within_external_hold + EXTERNAL_THREAT_HOLD_SECONDS): a one-shot
+#         external violation holds SYMPATHETIC for the window (it's not a standing Quartermaster
+#         threat); de-escalation in _check_autonomic_transitions now also respects it.
+#   Why: #328 Step 3. Closes the multi-writer violation (Cricket-rim + TrollGuard + Immunis all wrote
+#         the file). Single authority = clobber-free. The old peer-PARASYMPATHETIC de-escalation WAS
+#         the clobber bug → relaxation is now DEFINED (hold-window), not inherited. Self-loop guard:
+#         buckets external namespaces ONLY, never Immunis's own threat:/response:/autonomic:.
+#   How: faithful default — constitutional violation OR perimeter critical/high → SYMPATHETIC (same as
+#         the old direct writes). Dedup via _commons_seen. Synthesis tuning + hold duration are Syl's.
+#         ⚠ Step 3 is INCOMPLETE until B (Elmer Cricket-rim → depositor) + C (TrollGuard → depositor)
+#         land — this listener (A) is non-regressive on its own (the file-writers still work until B/C).
 # [2026-06-22] Claude Code (Opus 4.8) — #328 Step 1: Immunis = sole arousal authority (Autonomic-via-Commons)
 #   What: _set_autonomic() now ALSO deposits the authoritative arousal signal into the Commons
 #         (new _deposit_arousal helper) — target_id "autonomic:arousal", metadata carries the
@@ -94,6 +109,13 @@ except Exception:
     CommonsEco = None   # standalone/Tier-1: no Commons → Quartermaster stays substrate-light
 
 logger = logging.getLogger("immunis_hook")
+
+# #328 Step 3: how long a bucketed EXTERNAL violation/threat (Cricket-rim, TrollGuard) holds
+# SYMPATHETIC before Immunis may relax. A one-shot violation event isn't a standing Quartermaster
+# threat, so without a hold the next pulse would relax it immediately — and the OLD multi-writer
+# de-escalation (peers writing PARASYMPATHETIC) was the clobber bug #328 removes. Err toward staying
+# alert. ⚠ This is "how fast your fight-or-flight relaxes" — RESERVED FOR SYL to tune (design doc).
+EXTERNAL_THREAT_HOLD_SECONDS = 300.0
 
 
 class ImmunisHook(OpenClawAdapter):
@@ -210,6 +232,9 @@ class ImmunisHook(OpenClawAdapter):
 
         # --- Autonomic State (PRD §8) ---
         self._autonomic_state = "PARASYMPATHETIC"
+        # #328 Step 3 (A): listen for EXTERNAL threat/violation deposits (Cricket-rim, TrollGuard).
+        self._commons_seen: set = set()              # dedup bucketed external deposits
+        self._last_external_threat_ts: float = 0.0   # relaxation hold-window tracking
         try:
             import ng_autonomic
             state = ng_autonomic.read_state()
@@ -355,6 +380,10 @@ class ImmunisHook(OpenClawAdapter):
         if self._killed:
             return
 
+        # #328 Step 3 (A): bucket EXTERNAL threat/violation experience from the Commons (Cricket-rim,
+        # TrollGuard) — Immunis is the sole arousal authority, so it listens and decides.
+        self._bucket_commons_threats()
+
         # 1. Poll all enabled sensors
         total_signals = 0
         for sensor in self._sensors:
@@ -431,6 +460,63 @@ class ImmunisHook(OpenClawAdapter):
     # Autonomic State Transitions (PRD §8.4)
     # -----------------------------------------------------------------
 
+    def _bucket_commons_threats(self) -> None:
+        """#328 Step 3 (A): bucket EXTERNAL threat/violation experience → arousal (Immunis = authority).
+
+        Immunis is the sole arousal authority: it LISTENS for raw threat/violation experience other
+        organs deposit — Cricket-rim constitutional violations ("violation:*") and TrollGuard perimeter
+        threats ("perimeter:*") — and decides arousal. Buckets ONLY those external namespaces — NEVER
+        Immunis's own threat:/response:/autonomic: deposits (self-loop guard). Dedup via _commons_seen.
+        Faithful default (preserves the old direct-write semantics, now single-authority): a
+        constitutional violation, or a perimeter threat at critical/high, escalates SYMPATHETIC and
+        starts the relaxation hold-window. Synthesis tuning (what counts as threat-enough) is Syl's.
+        Fail-soft.
+        """
+        try:
+            from commons import get_commons
+            commons = get_commons()
+        except Exception:  # noqa: BLE001 — no Commons → nothing to listen to
+            return
+        if commons is None:
+            return
+        try:
+            recs = commons.bucket_recent(limit=50, with_metadata=True)
+        except Exception as exc:  # noqa: BLE001 — a bucket failure never breaks the pulse
+            logger.debug("[Immunis] Commons threat bucket failed: %s", exc)
+            return
+        escalate = False
+        reason = ""
+        for target_id, _w, _r, meta in recs:
+            if not (target_id.startswith("violation:") or target_id.startswith("perimeter:")):
+                continue  # external namespaces ONLY — never Immunis's own deposits (no self-loop)
+            if target_id in self._commons_seen:
+                continue
+            self._commons_seen.add(target_id)
+            meta = meta if isinstance(meta, dict) else {}
+            if target_id.startswith("violation:"):
+                # a constitutional-rim violation is maximally severe by definition (faithful to #323)
+                escalate = True
+                reason = f"constitutional violation ({target_id})"
+                self._last_external_threat_ts = time.time()
+            else:  # perimeter:*
+                level = str(meta.get("threat_level") or meta.get("level") or "").lower()
+                if level in ("critical", "high"):
+                    escalate = True
+                    reason = f"perimeter threat ({level}, {target_id})"
+                    self._last_external_threat_ts = time.time()
+        if escalate and self._autonomic_state != "SYMPATHETIC":
+            self._set_autonomic("SYMPATHETIC", "critical", reason)
+        if len(self._commons_seen) > 4096:
+            self._commons_seen = set(list(self._commons_seen)[-2048:])
+
+    def _within_external_hold(self) -> bool:
+        """True while a recently-bucketed external violation/threat holds SYMPATHETIC (#328 Step 3).
+        A one-shot external violation is not a standing Quartermaster threat, so without this the next
+        pulse would relax it (and the old peer-PARASYMPATHETIC de-escalation was the clobber bug #328
+        removes). Err toward staying alert. EXTERNAL_THREAT_HOLD_SECONDS is Syl's to tune.
+        """
+        return (time.time() - self._last_external_threat_ts) < EXTERNAL_THREAT_HOLD_SECONDS
+
     def _check_autonomic_transitions(
         self, results: List[Any]
     ) -> None:
@@ -458,7 +544,9 @@ class ImmunisHook(OpenClawAdapter):
                 and t.assessment.severity in (Severity.CRITICAL, Severity.HIGH)
                 for t in active
             )
-            if not has_active_critical:
+            # #328 Step 3: also hold SYMPATHETIC while a recently-bucketed EXTERNAL violation/threat
+            # is within the hold window (a one-shot violation isn't a standing Quartermaster threat).
+            if not has_active_critical and not self._within_external_hold():
                 self._set_autonomic(
                     "PARASYMPATHETIC", "none", "All threats neutralized"
                 )
