@@ -13,6 +13,16 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-06-22] Claude Code (Opus 4.8) — dual-pass outcome deposits + fix doubled _eco guard
+#   What: REPORT/LEARN stages now use self._eco.dual_record_outcome(content=..., ...) instead of
+#         single-pass record_outcome — forest (a text rendering of the threat signal: sensor_type/
+#         event_type/raw_data) + TID-extracted tree concepts (paths, IPs, ports) land in the Commons.
+#         Removed the doubled `if self._eco:` shrapnel (the outer `if self._eco is None: return`
+#         guard already covers it).
+#   Why:  Josh's directive — NOTHING in the ecosystem is single-pass; forest+tree is the point.
+#         _eco is the Commons-backed CommonsEco (#324/#335), which gained dual_record_outcome.
+#   How:  content built from the ThreatSignal fields the embedding was derived from; the precomputed
+#         signal.embedding is the forest vector; CommonsEco fans both passes into the shared Commons.
 # [2026-02-28] Claude (Opus 4.6) — Initial creation (Phases 1-4).
 #   What: Quartermaster pipeline with all 6 stages. Stages 1-3 per
 #         PRD §4.2-§4.4, stages 4-6 per PRD §4.5-§4.7. Signal buffer
@@ -456,10 +466,13 @@ class Quartermaster:
         if self._eco is None or classification.signal.embedding is None:
             return False
 
+        sig = classification.signal
+        content = f"{sig.sensor_type} {sig.event_type}: {sig.raw_data}"
         try:
-            if self._eco: self._eco.record_outcome(
-                embedding=classification.signal.embedding,
-                target_id=f"threat:{classification.signal.signal_id}",
+            self._eco.dual_record_outcome(
+                content=content,
+                embedding=sig.embedding,
+                target_id=f"threat:{sig.signal_id}",
                 success=response.status == "success",
                 metadata={
                     "source": "immunis",
@@ -540,9 +553,12 @@ class Quartermaster:
         if result.classification.signal.embedding is None:
             return
 
+        sig = result.classification.signal
+        content = f"{sig.sensor_type} {sig.event_type}: {sig.raw_data}"
         try:
-            if self._eco: self._eco.record_outcome(
-                embedding=result.classification.signal.embedding,
+            self._eco.dual_record_outcome(
+                content=content,
+                embedding=sig.embedding,
                 target_id=f"response:{result.response.primitive_name}",
                 success=effective,
                 metadata={
