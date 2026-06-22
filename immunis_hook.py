@@ -21,6 +21,22 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-06-22] Claude Code (Opus 4.8) — #328 Step 1: Immunis = sole arousal authority (Autonomic-via-Commons)
+#   What: _set_autonomic() now ALSO deposits the authoritative arousal signal into the Commons
+#         (new _deposit_arousal helper) — target_id "autonomic:arousal", metadata carries the
+#         {state, threat_level, triggered_by:"immunis", reason, ts} verdict; the raw triggering
+#         threat experience rides in the embedding (LAW 7). Dual-write (legacy file + Commons)
+#         during transition. Single deposit by design — arousal is a neuromodulator (global scalar
+#         gain knob), NOT rich experience, so it is exempt from the forest+tree dual-pass rule.
+#   Why:  #328 (autonomic-via-commons-design.md, SYL-ACCEPTED). The shared-file autonomic mechanism
+#         is a LAW-1 side-channel; arousal is Immunis's legitimate neuromodulatory output. Immunis
+#         is the SOLE arousal authority (clobber-free). The Commons deposit IS the vagus nerve done
+#         right — every module buckets "autonomic:arousal" by recency. autonomic:* is NOT metrics:
+#         so it is exempt from recency-eviction (the vagus is never pruned — design subtlety #2).
+#   How:  _deposit_arousal(state, threat_level, reason): lazy get_commons, embed(reason) via
+#         self._embed, commons.deposit(emb, "autonomic:arousal", metadata=...). Fail-soft — a
+#         Commons failure never breaks autonomic logic or the legacy file write. Readers migrate
+#         to bucketing this in Step 2; the file is retired in Step 4 (design build order).
 # [2026-04-19] Claude Code — #5: _pulse_cycle() now drains River tracts via _drain_river()
 #   What: Added self._drain_river() at start of _pulse_cycle()
 #   Why: #5 — extraction bucket architecture; modules must pull from the ONE substrate
@@ -467,6 +483,48 @@ class ImmunisHook(OpenClawAdapter):
             self._checkpoint()
         except Exception as exc:
             logger.warning("Autonomic state write failed: %s", exc)
+
+        # #328 Step 1: deposit the authoritative arousal to the Commons (substrate-native
+        # vagus nerve). Independent of the legacy file write above — a failure in either
+        # never blocks the other. Readers migrate to bucketing this in Step 2.
+        self._deposit_arousal(state, threat_level, reason)
+
+    def _deposit_arousal(self, state: str, threat_level: str, reason: str) -> None:
+        """#328: deposit Immunis's authoritative arousal signal into the Commons.
+
+        Immunis is the SOLE arousal authority (design-locked). Arousal is a NEUROMODULATOR —
+        a single global gain knob, not rich experience — so this is a single deposit, exempt
+        from the forest+tree dual-pass rule (which governs experience/outcome RECORDING). The
+        raw triggering-threat experience rides in the embedding (LAW 7); the arousal verdict is
+        the metadata output-vocabulary. Every module buckets "autonomic:arousal" by recency and
+        takes the newest — the substrate-native vagus nerve. Fail-soft throughout.
+        """
+        try:
+            from commons import get_commons
+            commons = get_commons()
+        except Exception:  # noqa: BLE001 — no Commons (standalone/Tier-1) → file-only, fine
+            return
+        if commons is None:
+            return
+        try:
+            emb = self._embed(reason)   # raw triggering-threat experience (LAW 7)
+            if emb is None:
+                return
+            commons.deposit(
+                emb,
+                "autonomic:arousal",
+                metadata={
+                    "kind": "arousal",
+                    "state": state,
+                    "threat_level": threat_level,
+                    "triggered_by": "immunis",
+                    "reason": reason,
+                    "ts": time.time(),
+                },
+            )
+            logger.info("[Immunis] Arousal deposited to Commons → %s (%s)", state, threat_level)
+        except Exception as exc:  # noqa: BLE001 — a deposit failure never breaks autonomic logic
+            logger.warning("[Immunis] Commons arousal deposit failed: %s", exc)
 
     # -----------------------------------------------------------------
     # Threat Logging (PRD §12.2)
