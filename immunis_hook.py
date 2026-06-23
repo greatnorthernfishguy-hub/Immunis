@@ -235,12 +235,10 @@ class ImmunisHook(OpenClawAdapter):
         # #328 Step 3 (A): listen for EXTERNAL threat/violation deposits (Cricket-rim, TrollGuard).
         self._commons_seen: set = set()              # dedup bucketed external deposits
         self._last_external_threat_ts: float = 0.0   # relaxation hold-window tracking
-        try:
-            import ng_autonomic
-            state = ng_autonomic.read_state()
-            self._autonomic_state = state.get("state", "PARASYMPATHETIC")
-        except Exception:
-            pass
+        # #328 Decision #2 (fresh-assess): arousal resets to PARASYMPATHETIC on restart and Immunis
+        # re-assesses fresh from its sensors + bucketed external deposits. Do NOT restore a
+        # possibly-stale state from the old file (and the file read is being retired). Stays at the
+        # PARASYMPATHETIC default set above.
 
         # --- Checkpointing ---
         self._last_checkpoint = time.time()
