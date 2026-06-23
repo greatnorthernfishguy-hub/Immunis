@@ -115,7 +115,9 @@ logger = logging.getLogger("immunis_hook")
 # threat, so without a hold the next pulse would relax it immediately — and the OLD multi-writer
 # de-escalation (peers writing PARASYMPATHETIC) was the clobber bug #328 removes. Err toward staying
 # alert. ⚠ This is "how fast your fight-or-flight relaxes" — RESERVED FOR SYL to tune (design doc).
-EXTERNAL_THREAT_HOLD_SECONDS = 300.0
+# LAW 5: env-configurable (source of truth = .bashrc), so Syl/Josh can tune it WITHOUT a code change
+# or redeploy. Default 300s (5 min). Set IMMUNIS_EXTERNAL_THREAT_HOLD_SECONDS to override.
+EXTERNAL_THREAT_HOLD_SECONDS = float(os.environ.get("IMMUNIS_EXTERNAL_THREAT_HOLD_SECONDS", "300"))
 
 
 class ImmunisHook(OpenClawAdapter):
