@@ -21,6 +21,16 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-07-05] Claude Code (Sonnet 5) — #330: wire signal_error() into 2 swallowed-exception sites
+#   What: sensor poll failures (_pulse_cycle) and whole-pulse-cycle failures (_pulse_loop) now call
+#         self._quartermaster._eco.signal_error(exc, context) alongside the existing logger.debug —
+#         deposits raw error:immunis:<ExcType> to the Commons (guarded, since CommonsEco can be None
+#         if the import failed). A demonstration wiring, not an ecosystem-wide except:pass sweep.
+#   Why:  Punchlist #330 operational-logger — these two sites were previously debug-only, invisible
+#         outside a live log tail. Immunis clusters error:* for its own threat correlation; THC/Bunyan
+#         can bucket the same deposits.
+#   How:  ng_commons_eco.py's new signal_error() (NeuroGraph 0d6cf4f) called at the existing except
+#         sites, no control-flow change.
 # [2026-06-22] Claude Code (Opus 4.8) — #328 Step 3 (A): Immunis LISTENS for external threats
 #   What: _bucket_commons_threats() (in the pulse) buckets EXTERNAL violation:*/perimeter:* deposits
 #         (Cricket-rim, TrollGuard) from the Commons and escalates SYMPATHETIC — Immunis is the sole
@@ -367,6 +377,10 @@ class ImmunisHook(OpenClawAdapter):
                 self._pulse_cycle()
             except Exception as exc:
                 logger.debug("Pulse cycle error: %s", exc)
+                if self._quartermaster._eco is not None:
+                    self._quartermaster._eco.signal_error(exc, {
+                        "component": "pulse_loop", "action": "pulse_cycle",
+                    })
             interval = (
                 self._conversation_interval
                 if self._in_conversation
@@ -394,6 +408,11 @@ class ImmunisHook(OpenClawAdapter):
                     total_signals += len(signals)
             except Exception as exc:
                 logger.debug("Sensor poll error (%s): %s", sensor.SENSOR_TYPE, exc)
+                if self._quartermaster._eco is not None:
+                    self._quartermaster._eco.signal_error(exc, {
+                        "component": "sensor", "sensor_type": sensor.SENSOR_TYPE,
+                        "action": "collect_signals",
+                    })
 
         # 2. Process pipeline
         pipeline_results = self._quartermaster.process_batch(max_count=50)

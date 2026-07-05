@@ -174,3 +174,22 @@ def test_buffer_overflow():
         qm.ingest_signal(_make_signal(seed=i))
     assert qm.buffer_size == 3
     assert qm._dropped_signals == 2
+
+
+def test_classify_signals_error_on_substrate_failure():
+    """#330: a substrate classification failure calls self._eco.signal_error(exc, context)."""
+    calls = []
+
+    class _BoomEco:
+        def get_context(self, embedding):
+            raise RuntimeError("substrate unreachable")
+
+        def signal_error(self, exc, context=None):
+            calls.append((exc, context))
+
+    qm = Quartermaster(config={}, ecosystem=_BoomEco())
+    qm._classify(_make_signal())
+    assert len(calls) == 1
+    exc, context = calls[0]
+    assert isinstance(exc, RuntimeError)
+    assert context["component"] == "quartermaster" and context["action"] == "classify"

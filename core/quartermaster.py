@@ -13,6 +13,12 @@ Canonical source: https://github.com/greatnorthernfishguy-hub/Immunis
 License: AGPL-3.0
 
 # ---- Changelog ----
+# [2026-07-05] Claude Code (Sonnet 5) — #330: wire signal_error() into _classify's substrate failure
+#   What: the "Substrate classification failed" except in _classify() now also calls
+#         self._eco.signal_error(exc, context) — deposits raw error:immunis:<ExcType> to the Commons.
+#         Direct self._eco access (already inside `if self._eco is not None:`), no new guard needed.
+#   Why:  Punchlist #330 operational-logger — was debug-only, invisible outside a live log tail.
+#   How:  ng_commons_eco.py's new signal_error() (NeuroGraph 0d6cf4f).
 # [2026-06-22] Claude Code (Opus 4.8) — dual-pass outcome deposits + fix doubled _eco guard
 #   What: REPORT/LEARN stages now use self._eco.dual_record_outcome(content=..., ...) instead of
 #         single-pass record_outcome — forest (a text rendering of the threat signal: sensor_type/
@@ -254,6 +260,10 @@ class Quartermaster:
                         )
             except Exception as exc:
                 logger.debug("Substrate classification failed: %s", exc)
+                self._eco.signal_error(exc, {
+                    "component": "quartermaster", "action": "classify",
+                    "sensor_type": signal.sensor_type, "signal_id": signal.signal_id,
+                })
 
         return classification
 
