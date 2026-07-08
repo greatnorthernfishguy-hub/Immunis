@@ -1,4 +1,17 @@
-"""Tests for core/config.py — ImmunisConfig loading and defaults."""
+"""Tests for core/config.py — ImmunisConfig loading and defaults.
+
+# ---- Changelog ----
+# [2026-07-08] Claude Code (Sonnet 5) — #355: fix stale embedding.dim assertion
+#   What: test_default_config asserted embedding.dim == 384; the real default has been 768
+#         since the #45 ecosystem-wide embedding migration (2026-03-19, core/config.py:196).
+#         cfg.embedding.model ("BAAI/bge-base-en-v1.5") is itself a separate, unused stale
+#         label — _embed() in immunis_hook.py calls the centralized ng_embed.embed() (real
+#         ecosystem standard: Snowflake/snowflake-arctic-embed-m-v1.5) unconditionally and
+#         never reads cfg.embedding.model. Not fixed here — cosmetic, zero behavioral impact,
+#         flagged for a future doc-hygiene pass, not worth its own punchlist item.
+#   Why:  Test never updated when the code default changed. No code regression.
+# -------------------
+"""
 
 import os
 import tempfile
@@ -26,7 +39,7 @@ def test_default_config():
     assert cfg.sensors.dependency.poll_interval_seconds == 300.0
     assert cfg.training_wheels.min_armory_entries == 50
     assert cfg.training_wheels.min_runtime_hours == 24
-    assert cfg.embedding.dim == 384
+    assert cfg.embedding.dim == 768
     assert cfg.emergency.kill_switch is False
 
 

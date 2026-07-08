@@ -2,6 +2,22 @@
 
 These tests verify the ImmunisHook initialization and interface
 without requiring a live system or the OpenClaw host.
+
+# ---- Changelog ----
+# [2026-07-08] Claude Code (Sonnet 5) — #355: fix 2 tests targeting a dead API
+#   What: test_hook_module_on_message_ok and test_hook_kill_switch both asserted on
+#         _module_on_message()'s return dict (status/signals_ingested/active_threats/
+#         autonomic_state) — but _module_on_message() is a documented no-op (`return {}`),
+#         since Immunis moved to autonomous pulse-cycle processing. Verified the kill
+#         switch itself is NOT broken: `self._killed` still gates _pulse_cycle() (the
+#         real live processing path) at its top, confirmed by reading the code before
+#         touching either test. Rewrote both against that live path instead of the dead
+#         return-value contract; test_hook_module_on_message_ok now asserts the actual
+#         no-op contract (`== {}`) rather than a stale populated-dict shape.
+#   Why:  Same failure shape as THC's #348 — tests never updated when message-scanning
+#         moved to the pulse cycle. Confirmed NOT masking a regression (unlike 2 of #348's
+#         6 tests, which did mask one — #354) before deciding to fix rather than flag.
+# -------------------
 """
 
 import os
@@ -132,7 +148,15 @@ def test_hook_instantiation(mock_external_modules):
 
 
 def test_hook_kill_switch(mock_external_modules, tmp_path):
-    """Kill switch prevents processing."""
+    """Kill switch prevents processing.
+
+    #355: Immunis processes autonomously via the pulse cycle now (_module_on_message
+    is a documented no-op — see test_hook_module_on_message_ok), so the kill switch's
+    real enforcement point is the `if self._killed: return` guard at the top of
+    _pulse_cycle(), not a message-scanning return value. Verify through that live path:
+    _bucket_commons_threats() (the first real work _pulse_cycle does after the guard)
+    must never be reached while killed.
+    """
     # Rewrite config with kill_switch: true
     et_modules = tmp_path / ".et_modules" / "immunis"
     config_path = et_modules / "config.yaml"
@@ -150,10 +174,10 @@ def test_hook_kill_switch(mock_external_modules, tmp_path):
     hook = ImmunisHook()
     assert hook._killed is True
 
-    # _module_on_message should return killed status
-    emb = np.random.randn(384).astype(np.float32)
-    result = hook._module_on_message("test", emb)
-    assert result["status"] == "killed"
+    calls = []
+    hook._bucket_commons_threats = lambda: calls.append(True)
+    hook._pulse_cycle()
+    assert calls == [], "kill switch must prevent _pulse_cycle() from doing any real work"
 
 
 def test_hook_embed_hash_fallback(mock_external_modules):
@@ -177,15 +201,18 @@ def test_hook_embed_deterministic(mock_external_modules):
 
 
 def test_hook_module_on_message_ok(mock_external_modules):
-    """_module_on_message returns ok status with no sensors."""
+    """_module_on_message is a documented no-op — Immunis processes via the pulse cycle.
+
+    #355: this used to assert a {"status": "ok", "signals_ingested": ..., ...} return
+    shape from a pre-pulse-cycle architecture. _module_on_message() is now genuinely
+    just `return {}` (see immunis_hook.py) — real sensor polling/triage/telemetry live
+    in _pulse_cycle() and _module_stats(), tested separately.
+    """
     from immunis_hook import ImmunisHook
     hook = ImmunisHook()
     emb = np.random.randn(384).astype(np.float32)
     result = hook._module_on_message("test message", emb)
-    assert result["status"] == "ok"
-    assert "signals_ingested" in result
-    assert "active_threats" in result
-    assert "autonomic_state" in result
+    assert result == {}
 
 
 def test_hook_module_stats(mock_external_modules):
