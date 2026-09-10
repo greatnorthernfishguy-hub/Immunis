@@ -41,6 +41,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from core.forensics_retention import (
+    RetentionPolicy,
+    prune_forensics,
+    should_prune,
+)
 
 logger = logging.getLogger("immunis.response")
 
@@ -144,6 +149,9 @@ class SnapshotForensics(ResponsePrimitive):
     changes, substrate state summary, and the triggering signal/classification.
     Saves to ~/.et_modules/immunis/forensics/{timestamp}_{signal_id}/
     """
+
+    #: Snapshots written by this process, for the amortised prune gate.
+    _snapshots_written: int = 0
 
     @property
     def severity_floor(self) -> str:
@@ -253,6 +261,31 @@ class SnapshotForensics(ResponsePrimitive):
                 json.dump(signal_data, f, indent=2, default=str)
         except Exception as exc:
             logger.debug("Trigger snapshot failed: %s", exc)
+
+        # Bound the directory. Amortised: every Nth snapshot, not every one.
+        # Failure here must never fail the snapshot — evidence already on disk
+        # matters more than the disk being tidy.
+        self._snapshots_written += 1
+        try:
+            policy = RetentionPolicy(
+                retain_days=self._config.get("forensics_retain_days", 14),
+                max_snapshots=self._config.get("forensics_max_snapshots", 20_000),
+                prune_every=self._config.get("forensics_prune_every", 50),
+            )
+            if should_prune(self._snapshots_written, policy):
+                pruned = prune_forensics(forensics_dir, policy)
+                if pruned.removed:
+                    logger.info(
+                        "Forensics retention: removed %d snapshot(s), %.1f MB freed, %d kept",
+                        pruned.removed, pruned.bytes_freed / (1024 * 1024), pruned.kept,
+                    )
+                if pruned.errors:
+                    logger.warning(
+                        "Forensics retention: %d snapshot(s) could not be removed",
+                        pruned.errors,
+                    )
+        except Exception as exc:  # noqa: BLE001 - never fail a snapshot over housekeeping
+            logger.debug("Forensics retention pass failed: %s", exc)
 
         duration = (time.time() - start) * 1000
         return ExecutionResult(

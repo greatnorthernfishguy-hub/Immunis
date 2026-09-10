@@ -164,6 +164,14 @@ class ResponseConfig:
     quarantine_dir: str = "~/.et_modules/immunis/quarantine"
     forensics_dir: str = "~/.et_modules/immunis/forensics"
     forensics_min_disk_mb: int = 100
+    # Retention. Nothing bounded this until 2026-09-10, by which point the VPS
+    # held 241,065 snapshot directories / 17 GB, accumulated over 79 days at
+    # ~3,038/day. The count cap is the binding constraint at that volume:
+    # 20,000 snapshots is a little under a week and roughly 1.2 GB.
+    forensics_retain_days: int = 14
+    forensics_max_snapshots: int = 20_000
+    #: Prune once every N snapshots so the write path stays a mkdir plus writes.
+    forensics_prune_every: int = 50
     protected_pids: List[int] = field(default_factory=list)
     protected_paths: List[str] = field(
         default_factory=lambda: [
