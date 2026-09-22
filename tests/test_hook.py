@@ -180,24 +180,26 @@ def test_hook_kill_switch(mock_external_modules, tmp_path):
     assert calls == [], "kill switch must prevent _pulse_cycle() from doing any real work"
 
 
-def test_hook_embed_hash_fallback(mock_external_modules):
-    """_embed uses hash fallback when device is disabled."""
+def test_hook_embed_fail_closed_when_disabled(mock_external_modules):
+    """_embed raises when device is disabled; no hash fallback (Packet 022)."""
     from immunis_hook import ImmunisHook
     hook = ImmunisHook()
-    emb = hook._embed("test text")
-    assert emb is not None
-    assert emb.shape == (384,)
-    norm = np.linalg.norm(emb)
-    assert abs(norm - 1.0) < 1e-5
+    with pytest.raises(RuntimeError):
+        hook._embed("test text")
 
 
-def test_hook_embed_deterministic(mock_external_modules):
-    """_embed produces deterministic results with hash fallback."""
+def test_hook_embed_delegates_to_ng_embed_when_enabled(mock_external_modules, monkeypatch):
+    """_embed delegates to ng_embed.embed and returns its result when enabled."""
     from immunis_hook import ImmunisHook
     hook = ImmunisHook()
-    emb1 = hook._embed("same input")
-    emb2 = hook._embed("same input")
-    np.testing.assert_array_equal(emb1, emb2)
+    # Force the embedding path enabled for this hook instance
+    hook._cfg.embedding.device = "cpu"
+    fake = np.random.randn(768).astype(np.float32)
+    called = []
+    monkeypatch.setattr("ng_embed.embed", lambda text: called.append(text) or fake)
+    result = hook._embed("same input")
+    assert result is fake
+    assert called == ["same input"]
 
 
 def test_hook_module_on_message_ok(mock_external_modules):

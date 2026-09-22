@@ -350,16 +350,22 @@ class ImmunisHook(OpenClawAdapter):
         """Embed text via ng_embed (centralized ecosystem embedding).
 
         Ecosystem standard: Snowflake/snowflake-arctic-embed-m-v1.5 (768-dim).
-        ONNX Runtime, no torch dependency.
+        ONNX Runtime, no torch dependency. Fail-closed: let embed errors raise.
+
+        # ---- Changelog ----
+        # [2026-09-22] Chief CC — fail-closed _embed (Packet 022 addendum)
+        # What: Removed SHA256 hash fallback; _embed now delegates directly to ng_embed.embed.
+        # Why: Hash fallback masked EmbeddingUnavailableError and violated LAW 4. QuantumGraph
+        #      canonicalized this pattern at f03f611; Josh requested all hooks use one canonical
+        #      _embed.
+        # How: Direct import+call; exceptions propagate to caller. Tests updated.
+        # -------------------
         """
         if self._cfg.embedding.device != "disabled":
-            try:
-                from ng_embed import embed
-                return embed(text)
-            except Exception:
-                pass
+            from ng_embed import embed
+            return embed(text)
 
-        return self._hash_embed(text)
+        raise RuntimeError("embedding device disabled and hash fallback removed")
 
     # -----------------------------------------------------------------
     # Autonomous Pulse Loop (#109)
