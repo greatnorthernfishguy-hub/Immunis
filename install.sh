@@ -69,7 +69,7 @@ fi
 
 # 5. Verify vendored files
 echo "[5/5] Verifying vendored files..."
-VENDORED_FILES=("ng_lite.py" "ng_peer_bridge.py" "ng_ecosystem.py" "openclaw_adapter.py" "ng_autonomic.py")
+VENDORED_FILES=("ng_lite.py" "ng_ecosystem.py" "openclaw_adapter.py" "ng_autonomic.py" "ng_embed.py" "ng_salience_gate.py" "ng_updater.py")
 ALL_PRESENT=true
 for f in "${VENDORED_FILES[@]}"; do
     if [ -f "$INSTALL_DIR/$f" ]; then
