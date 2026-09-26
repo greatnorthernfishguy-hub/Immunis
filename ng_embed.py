@@ -23,6 +23,62 @@ Dual-pass (Punchlist #81 — Josh's invention):
   tree links form naturally through similarity association.
 
 # ---- Changelog ----
+# [2026-09-26] openrouter/deepseek/deepseek-v4.1-flash (OpenCode harness on T3 Code),
+#   lane z2-ngembed-cap-roundrobin-20260926 — #666.
+# What: _extract_concepts now builds its concept union by round-robin interleave
+#   across windows (for rank i, each window contributes its i-th concept in
+#   window order; dedup; first-seen order within a window) before applying the
+#   unchanged max_concepts cap.
+# Why:  the prior positional union let the head window fill the cap and silently
+#   drop later windows' concepts (#666, Exec P267(2)).
+# How:  collect the per-window lists first (still fail-fast None), then
+#   round-robin; max_concepts stays 20, _DEFAULT_CONFIG untouched.
+# -------------------
+# [2026-09-26] openrouter/deepseek/deepseek-v4.1-flash (OpenCode harness on T3 Code),
+#   lane z2-dualpass-reconcile-20260926 — P264(2) Task B, Z11 note.
+# What: the NGEmbed.__init__ comment block under "# Dual-pass stats" is reworded
+#   comment-only from "Forest-only warning rate-limit" to name the pass-2
+#   extraction-failure warning rate-limit; it now states that a failed
+#   extraction raises DualPassIncompleteError with no deposit.
+# Why: Z11 review of the dual-pass branch flagged the stale forest-only wording
+#   (there is no forest-only path); Chief ruling item 3. The
+#   DualPassIncompleteError class docstring is left as is (accurate).
+# How: one comment block reworded; date 2026-07-16 kept. No code change.
+# -------------------
+# [2026-09-25] Claude Code (kimi-k2.7-code) — Packet 214 V-1/V-2/D-2/D-3/LAW-5
+#   corrective build (chief-p226-ruling-001).
+#   What: (1) Call tokenizer.no_truncation() after every Tokenizer.from_pretrained
+#         calls so the shipped tokenizer.json max_length does not re-impose
+#         truncation; (2) build EmbedWindow.text from raw prefixed string char
+#         offsets instead of decode-round-trip; (3) wrap _ensure_tokenizer's
+#         from_pretrained in EmbeddingUnavailableError; (4) correct stale
+#         dual-pass contract docs; (5) read NG_EMBED_TID_ENDPOINT from env;
+#         (6) publish the fully-configured tokenizer BEFORE assigning to
+#         self._tokenizer in both load paths, closing the race where a concurrent
+#         caller could encode against a still-truncating tokenizer; (7) import
+#         Tokenizer inside the D-2 try block; (8) revert pad_token to the
+#         original string (the empty pad_token change was unexplained and broke
+#         tokenizer-emitted padding warnings).
+#   Why:  V-1: source-grep test "enable_truncation not in source" shipped while
+#         the tokenizer's own config still truncated. V-2: decode round-trip
+#         altered experience before deposit (LAW 7) and diverged local/remote
+#         vectors. D-2/D-3: contract leaks and stale docs. LAW 5: env is source
+#         of truth. Race/pad_token: identified by native law-enforcer review.
+#   How:  no_truncation() and enable_padding() now run on a local tokenizer
+#         variable before publishing to self._tokenizer. _ensure_tokenizer's from
+#         tokenizers import moved inside try/except. pad_token restored in both
+#         load paths. All other changes per Packet 214.
+# -------------------
+# [2026-09-22] Grok 4.6 — punchlist-001 B2: overlapping TID extraction windows
+#   What: _extract_concepts no longer slices text[:2000]. Overlapping
+#         max_content_for_extraction (2000) char windows cover the full
+#         text; each window is one TID call (same per-call timeout);
+#         results are unioned then capped at max_concepts. Any window
+#         returning None fails the whole extraction (no deposit).
+#   Why:  The 2000-char slice dropped the rest of the turn from Pass 2.
+#         Forest embed()/embed_windows() path is unchanged.
+#   How:  _char_extract_windows + per-window _tid_extract_window; overlap
+#         extract_window_overlap (256). Short text (≤2000) is one call.
 # [2026-09-21] Grok 4.6 — HF token is not a _hf_post parameter (R-2).
 #   What: _hf_post reads the bearer via _get_hf_token() internally.
 #         Token is no longer a function argument (traceback locals).
@@ -172,7 +228,8 @@ _DEFAULT_CONFIG = {
 
     # Dual-pass (Punchlist #81)
     "tid_endpoint": "http://127.0.0.1:7437/v1/chat/completions",
-    "max_content_for_extraction": 2000,     # Chars sent to TID
+    "max_content_for_extraction": 2000,     # Chars per TID extraction window
+    "extract_window_overlap": 256,          # Char overlap between TID windows
     "max_concepts": 20,                     # Cap extracted concepts
     "forest_to_tree_weight": 0.4,           # Bootstrap synapse weight
     "tree_to_forest_ratio": 0.7,            # tree→forest = forest_weight * ratio
@@ -229,6 +286,9 @@ class NGEmbed:
         self._config = dict(_DEFAULT_CONFIG)
         if config:
             self._config.update(config)
+        self._config["tid_endpoint"] = os.environ.get(
+            "NG_EMBED_TID_ENDPOINT", self._config["tid_endpoint"]
+        )
 
         self._session = None          # ONNX InferenceSession (lazy)
         self._tokenizer = None        # tokenizers.Tokenizer (lazy)
@@ -246,10 +306,12 @@ class NGEmbed:
         self._extractions = 0
         self._concepts_total = 0
         self._failures = 0
-        # Forest-only warning rate-limit (2026-07-16): when TID is permanently
-        # absent (e.g. CC on a TID-less River), every deposit fails extraction —
-        # warn periodically with a suppressed-count instead of per-deposit, so the
-        # signal survives without flooding. self._failures stays the cumulative truth.
+        # Pass-2 extraction-failure warning rate-limit (2026-07-16): when TID is
+        # permanently absent (e.g. CC on a TID-less River), every deposit fails
+        # pass-2 extraction — a failed extraction raises DualPassIncompleteError
+        # with no deposit, so warn periodically with a suppressed-count instead
+        # of per-deposit, so the signal survives without flooding. self._failures
+        # stays the cumulative truth.
         self._last_extract_warn = 0.0
         self._failures_at_last_warn = 0
 
@@ -331,11 +393,16 @@ class NGEmbed:
                     providers=["CPUExecutionProvider"],
                 )
 
-                # Load tokenizer
-                self._tokenizer = Tokenizer.from_pretrained(model_id)
-                self._tokenizer.enable_padding(
+                # Load tokenizer. The model's shipped tokenizer.json may
+                # include truncation config; disable it explicitly (V-1).
+                # Configure fully before publishing to self._tokenizer so a
+                # concurrent caller never sees truncation-enabled state.
+                _tokenizer = Tokenizer.from_pretrained(model_id)
+                _tokenizer.no_truncation()
+                _tokenizer.enable_padding(
                     pad_id=0, pad_token="[PAD]",
                 )
+                self._tokenizer = _tokenizer
 
                 self._model_loaded = True
                 logger.info(
@@ -416,10 +483,12 @@ class NGEmbed:
             window_jobs: List[tuple] = []
             for i in long_idx:
                 ids = list(encodings[i].ids)
-                for wrapped, interior_slice, weight, _start, _end in self._window_token_ids(ids):
-                    w_text = self._tokenizer.decode(
-                        interior_slice, skip_special_tokens=True,
-                    )
+                prefixed_text = prefixed[i]
+                enc = encodings[i]
+                for wrapped, _interior_slice, weight, start, end in self._window_token_ids(ids):
+                    char_start = enc.offsets[start][0]
+                    char_end = enc.offsets[end - 1][1]
+                    w_text = prefixed_text[char_start:char_end]
                     window_jobs.append((i, weight, wrapped, w_text))
             if self._remote_mode:
                 vecs = self._hf_remote_embed_batch(
@@ -477,10 +546,10 @@ class NGEmbed:
         embeddings: List[np.ndarray] = []
         weights: List[int] = []
         jobs = []
-        for wrapped, interior_slice, weight, _start, _end in self._window_token_ids(ids):
-            w_text = self._tokenizer.decode(
-                interior_slice, skip_special_tokens=True,
-            )
+        for wrapped, _interior_slice, weight, start, end in self._window_token_ids(ids):
+            char_start = encoding.offsets[start][0]
+            char_end = encoding.offsets[end - 1][1]
+            w_text = prefixed[char_start:char_end]
             jobs.append((w_text, wrapped, weight))
 
         if self._remote_mode:
@@ -511,14 +580,22 @@ class NGEmbed:
         )
 
     def _ensure_tokenizer(self) -> None:
-        """Load tokenizer without ONNX (needed to window in remote mode)."""
+        """Load tokenizer without ONNX (needed to window in remote mode).
+
+        Raises EmbeddingUnavailableError on any load failure.
+        """
         if self._tokenizer is not None:
             return
-        from tokenizers import Tokenizer
-        self._tokenizer = Tokenizer.from_pretrained(self._config["model_id"])
-        self._tokenizer.enable_padding(
-            pad_id=0, pad_token="[PAD]",
-        )
+        try:
+            from tokenizers import Tokenizer
+            _tokenizer = Tokenizer.from_pretrained(self._config["model_id"])
+            _tokenizer.no_truncation()
+            _tokenizer.enable_padding(
+                pad_id=0, pad_token="[PAD]",
+            )
+            self._tokenizer = _tokenizer
+        except Exception as exc:
+            raise EmbeddingUnavailableError(f"tokenizer load failed: {exc}") from exc
 
     def _apply_prefix(self, text: str, is_query: bool) -> str:
         if is_query:
@@ -541,6 +618,11 @@ class NGEmbed:
 
         Interior window length ≤ 510 so the wrapped sequence stays ≤ 512.
         Raises if the full encoding is missing a leading CLS or trailing SEP.
+
+        Returns tuples of (wrapped_ids, interior_slice, weight, start, end)
+        where start/end are ENCODING-relative indices (i.e., start points at
+        the first token after CLS and end is one-past the last interior token),
+        suitable for indexing encoding.offsets.
         """
         cls_id, sep_id = self._cls_sep_ids()
         if not ids or ids[0] != cls_id or ids[-1] != sep_id:
@@ -555,7 +637,8 @@ class NGEmbed:
             end = min(start + _WINDOW_INTERIOR, n)
             slice_ids = interior[start:end]
             wrapped = [cls_id] + slice_ids + [sep_id]
-            out.append((wrapped, slice_ids, end - start, start, end))
+            # +1 to make bounds encoding-relative (skip leading CLS).
+            out.append((wrapped, slice_ids, end - start, start + 1, end + 1))
             if end >= n:
                 break
             start += _WINDOW_INTERIOR - _WINDOW_OVERLAP
@@ -1042,20 +1125,30 @@ class NGEmbed:
         except Exception:
             pass
 
-    def _extract_concepts(self, text: str) -> Optional[List[str]]:
-        """Extract concepts from text via TID LLM call.
+    def _char_extract_windows(self, text: str) -> List[str]:
+        """Overlapping char windows covering the full text. Short text is one window."""
+        size = int(self._config["max_content_for_extraction"])
+        overlap = int(self._config.get("extract_window_overlap", 256))
+        if size <= 0 or len(text) <= size:
+            return [text]
+        overlap = max(0, min(overlap, size - 1))
+        step = max(1, size - overlap)
+        windows: List[str] = []
+        start = 0
+        n = len(text)
+        while start < n:
+            end = min(start + size, n)
+            windows.append(text[start:end])
+            if end >= n:
+                break
+            start += step
+        return windows
 
-        One LLM call per ingestion. Returns the list of concept strings (possibly empty `[]`
-        when TID legitimately found none), or **`None`** when the call itself FAILED (TID down /
-        timeout / malformed response). The None-vs-[] distinction lets the caller surface a real
-        failure instead of silently treating a broken extraction as "no concepts" (no silent
-        failures).
-        """
+    def _tid_extract_window(self, content: str) -> Optional[List[str]]:
+        """One TID call for one extraction window. None = this call failed."""
         import requests
 
-        content = text[:self._config["max_content_for_extraction"]]
         prompt = _EXTRACTION_PROMPT.format(content=content)
-
         try:
             resp = requests.post(
                 self._config["tid_endpoint"],
@@ -1078,10 +1171,7 @@ class NGEmbed:
             response_text = (
                 resp.json()["choices"][0]["message"]["content"].strip()
             )
-
-            concepts = self._parse_concepts(response_text)
-            return concepts[:self._config["max_concepts"]]
-
+            return self._parse_concepts(response_text)
         except Exception as exc:
             # Count every failure (self._failures is the cumulative truth, surfaced
             # in status). The user-facing WARNING is emitted rate-limited by the
@@ -1091,8 +1181,43 @@ class NGEmbed:
             logger.debug("Concept extraction failed (TID): %s", exc)
             return None
 
+    def _extract_concepts(self, text: str) -> Optional[List[str]]:
+        """Extract concepts from text via TID LLM call.
+
+        Overlapping windows of `max_content_for_extraction` chars cover the
+        full text. Each window is one TID call (same per-call timeout).
+        Window results are unioned by round-robin interleave — for rank i,
+        each window contributes its i-th concept in window order (dedup,
+        first-seen order within a window) — then capped at `max_concepts`.
+        A positional union let the head window fill the cap and silently
+        drop later windows' concepts (#666).
+
+        Returns the list of concept strings (possibly empty `[]` when TID
+        legitimately found none), or **`None`** when any window call FAILED
+        (TID down / timeout / malformed response). The None-vs-[] distinction
+        lets the caller surface a real failure instead of silently treating a
+        broken extraction as "no concepts" (no silent failures).
+        """
+        union: List[str] = []
+        seen = set()
+        per_window: List[List[str]] = []
+        for window in self._char_extract_windows(text):
+            concepts = self._tid_extract_window(window)
+            if concepts is None:
+                return None
+            per_window.append(concepts)
+        max_rank = max((len(concepts) for concepts in per_window), default=0)
+        for i in range(max_rank):
+            for concepts in per_window:
+                if i < len(concepts):
+                    concept = concepts[i]
+                    if concept not in seen:
+                        seen.add(concept)
+                        union.append(concept)
+        return union[: self._config["max_concepts"]]
+
     def _extraction_warn_due(self) -> int:
-        """Rate-limit the forest-only degradation warning. Returns the number of
+        """Rate-limit the pass-2 extraction failure warning. Returns the number of
         failures since the last emitted warning when a warning is due (>=1, truthy),
         else 0. Interval via CC_EXTRACT_WARN_INTERVAL_S (default 60s). Attrs are
         getattr-defaulted so it works regardless of construction path."""
